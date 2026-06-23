@@ -1,4 +1,5 @@
 import '../src/style.css';
+import '../src/modes.css';
 
 export const metadata = {
   title: 'Spectral Front',
