@@ -5,7 +5,18 @@ import { SHIP_RADIUS, WORLD } from './game-model';
 
 export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
   const viewport = useRef(null), canvas = useRef(null);
-  const [now, setNow] = useState(() => Date.now());
+  // Shared game events only carry a stable shot id. Each client owns its
+  // animation clock, which avoids assuming its system clock matches the host.
+  const eventStarts = useRef(new Map());
+  const [now, setNow] = useState(() => performance.now());
+  const eventAge = event => {
+    let start = eventStarts.current.get(event.id);
+    if (start === undefined) {
+      start = performance.now();
+      eventStarts.current.set(event.id, start);
+    }
+    return Math.max(0, now - start);
+  };
   const draw = useCallback(() => {
     const element = canvas.current, box = viewport.current;
     if (!element || !box || !game) return;
@@ -23,19 +34,32 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
     if (origin?.hp) { ctx.setLineDash([5, 6]); ctx.strokeStyle = '#5fe2d455'; ctx.beginPath(); ctx.moveTo(0, origin.y); ctx.lineTo(WORLD.width, origin.y); ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, WORLD.height); ctx.stroke(); ctx.setLineDash([]); ctx.strokeStyle = '#5fe2d4'; ctx.beginPath(); ctx.arc(origin.x, origin.y, SHIP_RADIUS + 2, 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = '#a7dcd8'; ctx.font = '10px DM Mono'; ctx.fillText('(0, 0)', origin.x + 15, origin.y - 13); }
     for (const planet of game.planets) drawPlanet(ctx, planet);
     for (const asteroid of game.asteroids || []) drawAsteroid(ctx, asteroid);
-    for (const trail of game.trails || []) { const age = Math.max(0, now - trail.createdAt); if (age < TRAIL_DURATION) drawLaserTrail(ctx, trail, age); }
-    const lastAge = Math.max(0, now - (game.lastShot?.createdAt || now));
-    if (['planet', 'ship'].includes(game.lastShot?.impact?.kind) && lastAge >= FLIGHT_TIME && lastAge < SHOT_DURATION) drawImpactBurst(ctx, game.lastShot.impact, lastAge - FLIGHT_TIME);
+    for (const trail of game.trails || []) { const age = eventAge(trail); if (age < TRAIL_DURATION) drawLaserTrail(ctx, trail, age); }
+    for (const bloom of game.blooms || []) { const age = eventAge(bloom); if (age >= FLIGHT_TIME && age < SHOT_DURATION) drawImpactBurst(ctx, bloom.impact, age - FLIGHT_TIME); }
     for (const [shipRole, ships] of Object.entries(game.ships)) for (const ship of ships) { if (!ship.hp) continue; ctx.save(); ctx.translate(ship.x, ship.y); ctx.fillStyle = shipRole === 'host' ? '#5fe2d4' : '#f27b82'; ctx.beginPath(); ctx.moveTo(shipRole === 'host' ? SHIP_RADIUS : -SHIP_RADIUS, 0); ctx.lineTo(shipRole === 'host' ? -6 : 6, -4); ctx.lineTo(shipRole === 'host' ? -3 : 3, 0); ctx.lineTo(shipRole === 'host' ? -6 : 6, 4); ctx.closePath(); ctx.fill(); ctx.restore(); }
   }, [game, now, role, selected]);
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => { const element = viewport.current; if (!element) return; const observer = new ResizeObserver(draw); observer.observe(element); return () => observer.disconnect(); }, [draw]);
-  useEffect(() => { if (!(game.trails || []).some(trail => Date.now() - trail.createdAt < TRAIL_DURATION)) return; let frame; const tick = () => { setNow(Date.now()); frame = requestAnimationFrame(tick); }; frame = requestAnimationFrame(tick); return () => cancelAnimationFrame(frame); }, [game.trails]);
+  useEffect(() => {
+    const events = [...(game.trails || []), ...(game.blooms || [])], activeIds = new Set(events.map(event => event.id)), startedAt = performance.now();
+    for (const event of events) if (!eventStarts.current.has(event.id)) eventStarts.current.set(event.id, startedAt);
+    for (const id of eventStarts.current.keys()) if (!activeIds.has(id)) eventStarts.current.delete(id);
+    const hasActiveEvent = time => (game.trails || []).some(trail => time - eventStarts.current.get(trail.id) < TRAIL_DURATION) || (game.blooms || []).some(bloom => time - eventStarts.current.get(bloom.id) < SHOT_DURATION);
+    if (!hasActiveEvent(startedAt)) return;
+    let frame;
+    const tick = () => {
+      const time = performance.now();
+      setNow(time);
+      if (hasActiveEvent(time)) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [game.trails, game.blooms]);
   const selectShipAt = event => { const element = canvas.current, bounds = element.getBoundingClientRect(), x = (event.clientX - bounds.left) / bounds.width * WORLD.width, y = (event.clientY - bounds.top) / bounds.height * WORLD.height; const index = game.ships[role].findIndex(ship => ship.hp && Math.hypot(ship.x - x, ship.y - y) <= SHIP_RADIUS + 7); if (index >= 0) onSelectShip(index); };
   return <div className="canvas-stage" ref={viewport}><canvas ref={canvas} aria-label="Match arena" onClick={selectShipAt} /></div>;
 }
 
-const FLIGHT_TIME = 195, FADE_TIME = 560, SHOT_DURATION = FLIGHT_TIME + FADE_TIME, TRAIL_FADE_TIME = 4200, TRAIL_DURATION = FLIGHT_TIME + TRAIL_FADE_TIME;
+const FLIGHT_TIME = 195, BLOOM_DURATION = 5200, SHOT_DURATION = FLIGHT_TIME + BLOOM_DURATION, TRAIL_FADE_TIME = 4200, TRAIL_DURATION = FLIGHT_TIME + TRAIL_FADE_TIME;
 function drawLaserTrail(ctx, trail, age) {
   const { path, hit } = trail;
   if (path.length < 2) return;
@@ -43,7 +67,8 @@ function drawLaserTrail(ctx, trail, age) {
   ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.globalAlpha = fade * 0.12; ctx.strokeStyle = color; ctx.lineWidth = 4.2; strokePath(ctx, segment); ctx.globalAlpha = fade * 0.26; ctx.lineWidth = 2.7; strokePath(ctx, segment); ctx.globalAlpha = fade * 0.55; ctx.strokeStyle = '#e9fbff'; ctx.lineWidth = 1.35; strokePath(ctx, segment); ctx.globalAlpha = fade * 0.8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.48; strokePath(ctx, segment); if (age <= FLIGHT_TIME) { ctx.globalAlpha = 0.85; ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(head.x, head.y, 1.8, 0, Math.PI * 2); ctx.fill(); } ctx.restore();
 }
 function strokePath(ctx, path) { ctx.beginPath(); path.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)); ctx.stroke(); }
-function drawImpactBurst(ctx, impact, age) { const progress = Math.min(1, age / FADE_TIME), random = seededRandom(impact.seed || 1), shipBurst = impact.kind === 'ship', count = shipBurst ? 42 : 26; ctx.save(); for (let index = 0; index < count; index += 1) { const angle = random() * Math.PI * 2, speed = (shipBurst ? 16 : 10) + random() * (shipBurst ? 58 : 42), distance = speed * progress, radius = 1.5 + progress * (shipBurst ? 5 + random() * 4 : 2 + random() * 3), alpha = (1 - progress) * (0.35 + random() * 0.55), x = impact.x + Math.cos(angle) * distance, y = impact.y + Math.sin(angle) * distance; ctx.globalAlpha = alpha; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); if (shipBurst && index % 3 !== 0) { const fire = ctx.createRadialGradient(x - radius * 0.25, y - radius * 0.25, 0, x, y, radius); fire.addColorStop(0, '#fff4b0'); fire.addColorStop(0.34, '#ffcb42'); fire.addColorStop(0.7, '#f05b20'); fire.addColorStop(1, '#70200f'); ctx.fillStyle = fire; } else ctx.fillStyle = index % 3 ? '#aab5bb' : '#e2e7e8'; ctx.fill(); } ctx.restore(); }
+const FIRE_PARTICLE_COLORS = ['#fff4b0', '#ffcb42', '#f58a28', '#e14a1d', '#8f260f'];
+function drawImpactBurst(ctx, impact, age) { const progress = Math.min(1, age / BLOOM_DURATION), travel = 1 - Math.exp(-7 * progress), quickFade = progress < 0.12 ? 1 - 0.72 * (progress / 0.12) : 0.28 * Math.pow(1 - (progress - 0.12) / 0.88, 0.42), random = seededRandom(impact.seed || 1), shipBurst = impact.kind === 'ship', count = shipBurst ? 42 : 26; ctx.save(); for (let index = 0; index < count; index += 1) { const angle = random() * Math.PI * 2, speed = (shipBurst ? 16 : 10) + random() * (shipBurst ? 58 : 42), distance = speed * travel, radius = 1.5 + travel * (shipBurst ? 5 + random() * 4 : 2 + random() * 3), alpha = quickFade * (0.35 + random() * 0.55), x = impact.x + Math.cos(angle) * distance, y = impact.y + Math.sin(angle) * distance; ctx.globalAlpha = alpha; ctx.fillStyle = shipBurst && index % 3 !== 0 ? FIRE_PARTICLE_COLORS[Math.floor(random() * FIRE_PARTICLE_COLORS.length)] : index % 3 ? '#aab5bb' : '#e2e7e8'; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill(); } ctx.restore(); }
 
 const PALETTES = {
   moon: { core: '#b8c0c5', edge: '#35404a', land: '#79858d', detail: '#4c5862' },

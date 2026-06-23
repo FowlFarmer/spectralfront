@@ -45,8 +45,8 @@ npm run start  # Serve a production build
 - Select a surviving ship, then enter a permitted mathematical expression for `y = f(x)`.
 - The selected ship is `(0, 0)` in the expression’s local coordinate system.
 - Constant vertical offsets are normalized away, so every trajectory begins at its selected ship even when the entered function contains a constant term.
-- A trajectory stops at planets, which remain in play; it destroys asteroids on contact; and a direct hit destroys one ship. A beam with no collision continues to the sector edge.
-- Shots render as timed laser pulses: the bright head follows the sampled path, leaves a short luminous tail, then fades away on impact. Planet impacts create an expanding gray debris burst; destroyed ships add a larger mix of gray hull fragments and fire-colored particles.
+- A trajectory stops at planets, which remain in play; it destroys asteroids on contact; and a direct hit destroys one ship. A beam with no collision continues outward beyond the visible sector.
+- Shots render as timed laser pulses: the bright head follows the sampled path, leaves a short luminous tail, then fades away on impact. Planet and asteroid impacts create an expanding gray debris burst; destroyed ships add a larger mix of gray hull fragments and fire-colored particles.
 - A malformed or unstable function loses the turn.
 - The first side with no surviving ships loses.
 - Every match generates a new board: each fleet spawns at random, separated positions inside its own third; two to six planets and a separated asteroid field are placed with enforced clearances. A bounded shared planet-volume budget creates one or two dominant anchor worlds, with the remaining planets much smaller; dense boards therefore read as a few large landmarks surrounded by minor bodies. Planets may enter each side’s territory, but remain at least three ship lengths from every ship.
@@ -65,7 +65,7 @@ The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, pa
 
 ### Arena renderer
 
-[`app/match/[matchId]/arena-canvas.js`](app/match/[matchId]/arena-canvas.js) is the only module that draws the arena. It observes the stable CSS viewport, not the canvas element, and creates a device-pixel-ratio-aware backing buffer. World coordinates are scaled into that buffer at draw time. Planet texture seeds and types are part of match state, so both live peers see the same procedural worlds.
+[`app/match/[matchId]/arena-canvas.js`](app/match/[matchId]/arena-canvas.js) is the only module that draws the arena. It observes the stable CSS viewport, not the canvas element, and creates a device-pixel-ratio-aware backing buffer. World coordinates are scaled into that buffer at draw time. Planet texture seeds and types are part of match state, so both live peers see the same procedural worlds. Impact and laser events contain a stable shot id and deterministic impact data; each renderer starts its visual clock when it receives that event, rather than relying on synchronized wall clocks.
 
 Planet appearance follows a size-aware taxonomy: small bodies favor moons, Mercurian, lava, Pluto-like, and rocky worlds; middle sizes favor terrestrial, ocean, ice, super-Earth, and mini-Neptune worlds; the largest worlds favor Neptune/Uranus-like ice giants and Jupiter/Saturn-like gas giants. Large worlds can also carry decorative moonlets and rings.
 
@@ -77,7 +77,7 @@ The arena viewport has a fixed 5:3 aspect ratio. On ultrawide layouts it remains
 - [`app/api/signal/route.js`](app/api/signal/route.js) relays short-lived WebRTC offer, answer, ICE candidate, and leave messages.
 - [`app/api/ice/route.js`](app/api/ice/route.js) returns the client ICE configuration for a matched ticket.
 
-The live-match host resolves gameplay state. This is appropriate for casual play; it is not designed for ranked, competitive, or economic use.
+The live-match host resolves gameplay state and sends the complete resulting state after every action. That state includes destroyed asteroids, ship damage, laser paths, and planet/asteroid/ship bloom events. This is appropriate for casual play; it is not designed for ranked, competitive, or economic use.
 
 ## Deploy to Vercel
 

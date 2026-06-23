@@ -6,7 +6,7 @@ const SHIP_CLEARANCE = SHIP_RADIUS * 6, PLANET_CLEARANCE = 32;
 
 export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff)) => {
   const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets);
-  return { seed, turn: 'host', round: 1, outcome: null, shotNumber: 0, lastPath: [], lastShot: null, trails: [], ships, planets, asteroids };
+  return { seed, turn: 'host', round: 1, outcome: null, shotNumber: 0, lastPath: [], lastShot: null, trails: [], blooms: [], ships, planets, asteroids };
 };
 
 function createFleets(random) {
@@ -80,7 +80,7 @@ const between = (random, min, max) => min + random() * (max - min);
 function seededRandom(seed) { let state = (seed >>> 0) || 1; return () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 0x100000000; }; }
 
 export const liveShips = (game, role) => game.ships[role].filter(ship => ship.hp > 0);
-const cloneGame = game => ({ ...game, ships: { host: game.ships.host.map(ship => ({ ...ship })), guest: game.ships.guest.map(ship => ({ ...ship })) }, lastPath: [...game.lastPath], trails: [...(game.trails || [])] });
+const cloneGame = game => ({ ...game, ships: { host: game.ships.host.map(ship => ({ ...ship })), guest: game.ships.guest.map(ship => ({ ...ship })) }, lastPath: [...game.lastPath], trails: [...(game.trails || [])], blooms: [...(game.blooms || [])] });
 const advanceTurn = (game, role) => { const opponent = ROLES[role]; if (!liveShips(game, opponent).length) game.outcome = role; else { game.turn = opponent; game.round += 1; } };
 
 export function applyGameAction(game, action) {
@@ -100,11 +100,23 @@ export function applyGameAction(game, action) {
     const target = liveShips(next, ROLES[role]).find(ship => Math.hypot(point.x - ship.x, point.y - ship.y) < SHIP_RADIUS);
     if (target) { target.hp = 0; hit = true; impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1 }; break; }
   }
+  const visualPath = impact ? resolvedPath : extendOutboundPath(resolvedPath);
   next.lastPath = resolvedPath; next.shotNumber = (game.shotNumber || 0) + 1;
-  next.lastShot = { id: next.shotNumber, role, path: resolvedPath, hit, impact, createdAt: Date.now() };
+  // Animation events must be serializable and clock-free. A remote peer cannot
+  // safely compare its wall clock to the host's; the renderer begins these
+  // shared events when it receives their stable shot id.
+  next.lastShot = { id: next.shotNumber, role, path: visualPath, hit, impact, outbound: !impact };
   next.trails = [...(next.trails || []), next.lastShot].slice(-8);
+  if (['planet', 'asteroid', 'ship'].includes(impact?.kind)) next.blooms = [...(next.blooms || []), { id: next.shotNumber, impact }].slice(-8);
   advanceTurn(next, role);
   return { game: next, hit, unstable: false };
+}
+
+function extendOutboundPath(path) {
+  if (path.length < 2) return path;
+  const last = path.at(-1), previous = path.at(-2), dx = last.x - previous.x, dy = last.y - previous.y, length = Math.hypot(dx, dy) || 1, extended = [...path];
+  for (let index = 1; index <= 160; index += 1) extended.push({ x: last.x + dx / length * index * 24, y: last.y + dy / length * index * 24 });
+  return extended;
 }
 
 export function createBotAction(game) {
