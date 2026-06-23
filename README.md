@@ -54,7 +54,7 @@ npm run start  # Serve a production build
 - The selected ship is `(0, 0)` in the expression’s local coordinate system.
 - Constant vertical offsets are normalized away, so every trajectory begins at its selected ship even when the entered function contains a constant term.
 - Every background grid square is **one graph unit**. The selected ship is the graph origin, so the hover readout, `x`, and `y` in an expression all use the same scale.
-- **Power sets range and cost**: beam travel distance is `power × 0.8` graph units along the traced arc; energy cost is `6 + (power / 100) × 54`.
+- **Power sets range and cost**: beam travel distance is `power × 0.8` graph units along the traced arc; energy cost scales linearly from **25** at 5% power to **100** at 100% power.
 - A dotted **trajectory preview** shows the first portion of the current arc from the selected ship.
 - A trajectory stops at planets and their orbiting moons, destroys asteroids on contact, and destroys one ship on a direct hit. Collisions resolve **immediately** when the shot is fired.
 - If the beam reaches its power limit with no collision, the notification reads **“Beam range exhausted.”** If the curve leaves the sector before that limit, it reads **“Beam exits the sector.”**
@@ -71,7 +71,7 @@ npm run start  # Serve a production build
 
 ### Match outcome
 
-- The first side with no surviving ships loses immediately. The authoritative game state records the winner and `fleet-destroyed` end reason and presents the same win/loss result to both live peers. Bot matches offer a fresh training sector; live matches return both commanders to the lobby.
+- The first side with no surviving ships loses. The win/loss screen appears **2 seconds** after the final ship is destroyed; combat locks immediately when a fleet is wiped. The authoritative game state records the winner and `fleet-destroyed` end reason and presents the same result to both live peers. Bot matches offer a fresh training sector; live matches return both commanders to the lobby.
 
 ### Board generation
 

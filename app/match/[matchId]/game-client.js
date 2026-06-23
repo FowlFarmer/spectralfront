@@ -12,6 +12,7 @@ import {
   ENERGY_MAX,
   fireEnergyCost,
   isMatchOver,
+  isCombatLocked,
   liveShips,
   MATCH_COUNTDOWN_MS,
   MOVE_INITIAL_COST,
@@ -22,14 +23,28 @@ import { notificationFor } from './notification-config';
 
 const sessionKey = 'spectral-front-session';
 const request = async (path, options = {}) => { const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options }); const body = await response.json().catch(() => ({})); if (!response.ok) throw Error(body.error || 'Network error'); return body; };
-const notificationKeyForResult = result => {
-  if (result.unstable) return 'unstableFunction';
-  if (result.hit) return 'directHit';
+const notificationKeyForFireResult = (result, shooterRole, viewerRole) => {
+  if (result.unstable) return shooterRole === viewerRole ? 'unstableFunction' : null;
+  if (result.hit && result.impact?.kind === 'ship') {
+    if (shooterRole === viewerRole) return 'enemyShipDestroyed';
+    if (result.impact.shipRole === viewerRole) return 'friendlyShipLost';
+    return null;
+  }
+  if (shooterRole !== viewerRole) return null;
   if (result.impact?.kind === 'asteroid') return 'asteroidDestroyed';
   if (result.impact?.kind === 'moon') return 'moonImpact';
   if (result.impact?.kind === 'planet') return 'planetImpact';
   if (result.stopReason === 'range') return 'beamRangeExpired';
   return 'beamExited';
+};
+
+const fireNoticeEvents = (result, shooterRole) => {
+  const events = [];
+  for (const role of ['host', 'guest']) {
+    const key = notificationKeyForFireResult(result, shooterRole, role);
+    if (key) events.push({ key, role });
+  }
+  return events;
 };
 
 export default function GameClient({ matchId }) {
@@ -74,11 +89,19 @@ export default function GameClient({ matchId }) {
       return null;
     }
     if (action.type === 'fire' && action.role === session.current?.role) rememberArc(action.expression);
-    if (action.type === 'move') pushNotice('moveOrdered');
-    if (action.type === 'cancelMove') pushNotice('moveCancelled');
-    if (action.type === 'fire') pushNotice(notificationKeyForResult(result));
+    if (action.type === 'move' && action.role === me) pushNotice('moveOrdered');
+    if (action.type === 'cancelMove' && action.role === me) pushNotice('moveCancelled');
+    if (action.type === 'fire') {
+      const events = fireNoticeEvents(result, action.role);
+      for (const event of events) {
+        if (event.role === me) pushNotice(event.key);
+      }
+      publish(result.game);
+      if (!isBotMatch) send({ type: 'state', state: result.game, events: [...events, ...(result.gameEvents || [])] });
+      return result;
+    }
     publish(result.game);
-    if (!isBotMatch) send({ type: 'state', state: result.game });
+    if (!isBotMatch) send({ type: 'state', state: result.game, events: result.gameEvents || [] });
     return result;
   }, [isBotMatch, publish, pushNotice, rememberArc, send]);
 
@@ -113,7 +136,7 @@ export default function GameClient({ matchId }) {
 
   const handleMove = useCallback(point => {
     const me = session.current?.role;
-    if (!me || isMatchOver(gameRef.current)) return;
+    if (!me || isCombatLocked(gameRef.current)) return;
     const ship = gameRef.current?.ships[me]?.[selected];
     if (!ship?.hp) return;
     submitAction({ type: 'move', role: me, shipIndex: selected, x: point.x, y: point.y });
@@ -121,7 +144,7 @@ export default function GameClient({ matchId }) {
 
   const handleCancelMove = useCallback(() => {
     const me = session.current?.role;
-    if (!me || isMatchOver(gameRef.current)) return;
+    if (!me || isCombatLocked(gameRef.current)) return;
     const ship = gameRef.current?.ships[me]?.[selected];
     if (ship?.hp && ship.moving && !ship.braking) submitAction({ type: 'cancelMove', role: me, shipIndex: selected });
   }, [selected, submitAction]);
@@ -153,7 +176,7 @@ export default function GameClient({ matchId }) {
   useEffect(() => {
     clearTimeout(botTimer.current);
     const tickKey = game ? `${game.seed}:${botDecisionWindow}` : null;
-    if (!isBotMatch || isMatchOver(game) || game?.phase !== 'live') { botTickKey.current = null; return; }
+    if (!isBotMatch || isCombatLocked(game) || game?.phase !== 'live') { botTickKey.current = null; return; }
     if (botTickKey.current === tickKey) return;
     botTickKey.current = tickKey;
     botTimer.current = window.setTimeout(() => takeBotTurn(tickKey), 150 + Math.random() * 180);
@@ -195,12 +218,12 @@ export default function GameClient({ matchId }) {
 
   if (!game || problem) return <div className="game-shell"><header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div></header><section className="disconnected standalone"><div>{!problem && <div className="spinner" />}<h2>{problem ? 'Match unavailable' : 'Setting up the duel'}</h2><p>{problem || 'Securing a direct browser connection…'}</p><button className="primary" onClick={leave}>BACK TO LOBBY</button></div></section></div>;
 
-  const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], matchOver = isMatchOver(game), combatActive = game.phase === 'live', won = game.outcome === me;
+  const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], matchOver = isMatchOver(game), combatLocked = isCombatLocked(game), combatActive = game.phase === 'live', won = game.outcome === me;
   const myEnergy = game.energy[me], fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
   const countdownSeconds = Math.max(0, Math.ceil(((game.countdownMs ?? MATCH_COUNTDOWN_MS) - (game.simTime || 0)) / 1000));
-  const canFire = combatActive && !matchOver && myShips[selected]?.hp && myEnergy >= fireCost;
+  const canFire = combatActive && !combatLocked && myShips[selected]?.hp && myEnergy >= fireCost;
   const fireCurrent = () => {
-    if (matchOver || !myShips[selected]?.hp) return;
+    if (combatLocked || !myShips[selected]?.hp) return;
     if (!combatActive) { pushNotice('combatStaging'); return; }
     if (myEnergy < fireCost) { pushNotice('notEnoughEnergyFire'); return; }
     submitAction({ type: 'fire', role: me, shipIndex: selected, expression: formula, power });
@@ -220,7 +243,7 @@ export default function GameClient({ matchId }) {
           </div>
           <div>
             <div className="player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · LEFT CLICK TO MOVE'}</small>
-              <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || matchOver} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button>)}</div>
+              <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button>)}</div>
             </div>
             <div className="player enemy"><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'NAVIGATION AI' : 'OPPOSING FLEET'}</small><div className="dots">{'● '.repeat(liveShips(game, foe).length) || '—'}</div></div>
           </div>
@@ -228,20 +251,22 @@ export default function GameClient({ matchId }) {
         </aside>
         <section className="panel arena-wrap">
           <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : combatActive ? `LIVE · ${Math.round((game.simTime || 0) / 1000)}s` : 'STAGING SEQUENCE'}</span></div>
-          <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={matchOver} expression={formula} power={power} previewDisabled={matchOver || !combatActive} />
-          <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
-          {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
+          <div className="arena-stage">
+            <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={combatLocked} expression={formula} power={power} previewDisabled={combatLocked || !combatActive} />
+            <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
+            {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
+          </div>
           {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} onRestart={restartBotMatch} onLeave={leave} />}
           <section className="command">
             <div className="formula">
               <label>FIRING ARC — Y = F(X)</label>
-              <div className="formula-row"><span>y =</span><input value={formula} disabled={matchOver} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
+              <div className="formula-row"><span>y =</span><input value={formula} disabled={combatLocked} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
               <div className="power-control">
                 <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange} graph units · {Math.round(fireCost)} energy</label>
-                <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={matchOver} onChange={event => setPower(+event.target.value)} />
+                <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={combatLocked} onChange={event => setPower(+event.target.value)} />
               </div>
               <div className="hint">{matchOver ? 'Command channel closed.' : !combatActive ? `Systems unlock in ${countdownSeconds}s. Set an arc while you wait.` : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship (0, 0) · sin, cos, tan, abs, sqrt, log/ln, exp'}</div>
-              {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={matchOver} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
+              {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={combatLocked} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
             </div>
             <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : !combatActive ? 'SYSTEMS ARMING' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM'}</button>
           </section>

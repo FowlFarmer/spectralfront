@@ -8,7 +8,7 @@ export const ENERGY_MAX = 100;
 export const ENERGY_REGEN = 4;
 export const BOT_ENERGY_REGEN = 2;
 export const MOVE_INITIAL_COST = 20;
-export const MOVE_ENERGY_PER_SEC = 6;
+export const MOVE_ENERGY_PER_SEC = 3;
 export const BEAM_DISTANCE_PER_POWER = 40;
 export const MAX_BEAM_DISTANCE = BEAM_DISTANCE_PER_POWER * 100;
 export const SHIP_MAX_SPEED = 2.13;
@@ -16,6 +16,7 @@ export const SHIP_ACCEL = 1.47;
 export const SHIP_DECEL = 1.2;
 export const SIM_TICK_MS = 50;
 export const MATCH_COUNTDOWN_MS = 12_000;
+export const MATCH_OUTCOME_DELAY_MS = 2_000;
 export const BOT_OPENING_SHOT_DELAY_MS = 10_000;
 export const BOT_SHOT_COOLDOWN_MS = 5_000;
 
@@ -23,7 +24,10 @@ const ROLES = Object.freeze({ host: 'guest', guest: 'host' });
 export const PLANET_TYPES = Object.freeze(['moon', 'mercurian', 'lava', 'plutoid', 'marslike', 'desert', 'venuslike', 'earthlike', 'ocean', 'ice', 'superEarth', 'miniNeptune', 'neptune', 'uranian', 'gasGiant', 'saturnian']);
 const SHIP_CLEARANCE = SHIP_RADIUS * 6, PLANET_CLEARANCE = 32;
 
-export const fireEnergyCost = power => 6 + (power / 100) * 54;
+export const fireEnergyCost = power => {
+  const clamped = Math.max(5, Math.min(100, power));
+  return 25 + ((clamped - 5) / 95) * 75;
+};
 export const beamDistanceForPower = power => Math.max(0, power) * BEAM_DISTANCE_PER_POWER;
 export const worldDistanceToGraphUnits = distance => distance / WORLD_UNITS_PER_GRAPH_UNIT;
 export const graphUnitsToWorldDistance = distance => distance * WORLD_UNITS_PER_GRAPH_UNIT;
@@ -37,7 +41,7 @@ export const measurePathLength = path => {
 
 export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { botMatch = false } = {}) => {
   const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets);
-  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), lastPath: [], lastShot: null, trails: [], blooms: [], energy: { host: 0, guest: 0 }, energyRegen: { host: ENERGY_REGEN, guest: botMatch ? BOT_ENERGY_REGEN : ENERGY_REGEN }, ships, planets, asteroids };
+  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), lastPath: [], lastShot: null, trails: [], blooms: [], energy: { host: 0, guest: 0 }, energyRegen: { host: ENERGY_REGEN, guest: botMatch ? BOT_ENERGY_REGEN : ENERGY_REGEN }, ships, planets, asteroids };
 };
 
 function createShip(x, y, role) {
@@ -125,6 +129,7 @@ function seededRandom(seed) { let state = (seed >>> 0) || 1; return () => { stat
 
 export const liveShips = (game, role) => game.ships[role].filter(ship => ship.hp > 0);
 export const isMatchOver = game => Boolean(game?.outcome);
+export const isCombatLocked = game => Boolean(game?.outcome || game?.pendingOutcome);
 
 const cloneGame = game => ({
   ...game,
@@ -140,13 +145,20 @@ function cloneShip(ship) {
 }
 
 function checkOutcome(game) {
+  if (game.outcome || game.pendingOutcome) return;
   for (const role of ['host', 'guest']) {
     if (!liveShips(game, ROLES[role]).length) {
-      game.outcome = role;
+      game.pendingOutcome = role;
+      game.outcomeAt = (game.simTime || 0) + MATCH_OUTCOME_DELAY_MS;
       game.endReason = 'fleet-destroyed';
       return;
     }
   }
+}
+
+function resolvePendingOutcome(game) {
+  if (game.outcome || !game.pendingOutcome) return;
+  if ((game.simTime || 0) >= (game.outcomeAt || 0)) game.outcome = game.pendingOutcome;
 }
 
 export function advanceSimulation(game, deltaMs) {
@@ -177,6 +189,7 @@ export function advanceSimulation(game, deltaMs) {
       }
     }
   }
+  resolvePendingOutcome(next);
   return { game: next, events };
 }
 
@@ -231,7 +244,7 @@ function applyDeceleration(ship, dtSec, minSpeed) {
 }
 
 export function applyGameAction(game, action) {
-  if (!action || isMatchOver(game)) return { game, ignored: true };
+  if (!action || isCombatLocked(game)) return { game, ignored: true };
   if (game.phase !== 'live') return { game, ignored: true, reason: 'countdown' };
   if (action.type === 'fire') return applyFire(game, action);
   if (action.type === 'move') return applyMove(game, action);
@@ -336,7 +349,7 @@ function hitsObstacle(game, point) {
 }
 
 export function createBotAction(game) {
-  if (!game || isMatchOver(game) || game.phase !== 'live') return null;
+  if (!game || isCombatLocked(game) || game.phase !== 'live') return null;
   const energy = game.energy.guest;
   const shooters = game.ships.guest.map((ship, index) => ({ ship, index })).filter(({ ship }) => ship.hp);
   if (!shooters.length) return null;
