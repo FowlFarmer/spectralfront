@@ -45,10 +45,10 @@ npm run start  # Serve a production build
 - Select a surviving ship, then enter a permitted mathematical expression for `y = f(x)`.
 - The selected ship is `(0, 0)` in the expression’s local coordinate system.
 - Constant vertical offsets are normalized away, so every trajectory begins at its selected ship even when the entered function contains a constant term.
-- A trajectory stops at planets, which remain in play; it destroys asteroids on contact; and a direct hit destroys one ship. A beam with no collision continues outward beyond the visible sector.
+- A trajectory stops at planets, which remain in play; it destroys asteroids on contact; and a direct hit destroys one ship. Each shot first enters a replicated in-flight state; its collision only changes the board when the beam reaches its endpoint, so asteroid removal, ship destruction, blooms, turn advance, and match completion occur together at impact.
 - Shots render as timed laser pulses: the bright head follows the sampled path, leaves a short luminous tail, then fades away on impact. Planet and asteroid impacts create an expanding gray debris burst; destroyed ships add a larger mix of gray hull fragments and fire-colored particles.
 - A malformed or unstable function loses the turn.
-- The first side with no surviving ships loses.
+- The first side with no surviving ships loses immediately. The authoritative game state records the winner and `fleet-destroyed` end reason, closes the turn, rejects any later actions, and presents the same win/loss result to both live peers. Bot matches offer a fresh training sector; live matches return both pilots to the lobby.
 - Every match generates a new board: each fleet spawns at random, separated positions inside its own third; two to six planets and a separated asteroid field are placed with enforced clearances. A bounded shared planet-volume budget creates one or two dominant anchor worlds, with the remaining planets much smaller; dense boards therefore read as a few large landmarks surrounded by minor bodies. Planets may enter each side’s territory, but remain at least three ship lengths from every ship.
 
 The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, parentheses, `+`, `-`, `*`, `/`, `^`, and `sin`, `cos`, `tan`, `abs`, `sqrt`, `log`, and `exp`; it never evaluates submitted JavaScript.
@@ -61,7 +61,7 @@ The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, pa
 
 ### Game model
 
-[`app/match/[matchId]/game-model.js`](app/match/[matchId]/game-model.js) is a pure simulation module. It defines the fixed world dimensions, generates valid fleet and planet placements, traces expressions, and applies the single `fire` action accepted by every participant. The bot only chooses a valid `fire` action; humans, the bot, and the live-match host all use the same action contract and state transition.
+[`app/match/[matchId]/game-model.js`](app/match/[matchId]/game-model.js) is a pure simulation module. It defines the fixed world dimensions, generates valid fleet and planet placements, traces expressions, and applies the single `fire` action accepted by every participant. Firing creates a clock-free `pendingShot`; the host resolves that shared event at the end of its visual flight. The bot only chooses a valid `fire` action; humans, the bot, and the live-match host all use the same action contract and state transition.
 
 ### Arena renderer
 

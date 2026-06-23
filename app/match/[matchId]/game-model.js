@@ -1,12 +1,13 @@
 export const WORLD = Object.freeze({ width: 1000, height: 600, grid: 50 });
 export const SHIP_RADIUS = 8;
+export const SHOT_FLIGHT_MS = 195;
 const ROLES = Object.freeze({ host: 'guest', guest: 'host' });
 export const PLANET_TYPES = Object.freeze(['moon', 'mercurian', 'lava', 'plutoid', 'marslike', 'desert', 'venuslike', 'earthlike', 'ocean', 'ice', 'superEarth', 'miniNeptune', 'neptune', 'uranian', 'gasGiant', 'saturnian']);
 const SHIP_CLEARANCE = SHIP_RADIUS * 6, PLANET_CLEARANCE = 32;
 
 export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff)) => {
   const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets);
-  return { seed, turn: 'host', round: 1, outcome: null, shotNumber: 0, lastPath: [], lastShot: null, trails: [], blooms: [], ships, planets, asteroids };
+  return { seed, turn: 'host', round: 1, outcome: null, endReason: null, shotNumber: 0, pendingShot: null, lastPath: [], lastShot: null, trails: [], blooms: [], ships, planets, asteroids };
 };
 
 function createFleets(random) {
@@ -66,7 +67,7 @@ function createAsteroids(random, ships, planets) {
   const asteroids = [], allShips = [...ships.host, ...ships.guest], count = 9 + Math.floor(random() * 7);
   for (let index = 0; index < count; index += 1) {
     for (let attempt = 0; attempt < 120; attempt += 1) {
-      const candidate = { x: Math.round(between(random, 205, 795)), y: Math.round(between(random, 28, WORLD.height - 28)), r: Math.round(between(random, 5, 13)), seed: Math.floor(random() * 0xffffffff) };
+      const candidate = { id: index, x: Math.round(between(random, 205, 795)), y: Math.round(between(random, 28, WORLD.height - 28)), r: Math.round(between(random, 5, 13)), seed: Math.floor(random() * 0xffffffff) };
       const clearOfShips = allShips.every(ship => Math.hypot(candidate.x - ship.x, candidate.y - ship.y) > candidate.r + 32);
       const clearOfPlanets = planets.every(planet => Math.hypot(candidate.x - planet.x, candidate.y - planet.y) > candidate.r + planet.r + 18);
       const clearOfAsteroids = asteroids.every(asteroid => Math.hypot(candidate.x - asteroid.x, candidate.y - asteroid.y) > candidate.r + asteroid.r + 12);
@@ -80,36 +81,62 @@ const between = (random, min, max) => min + random() * (max - min);
 function seededRandom(seed) { let state = (seed >>> 0) || 1; return () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 0x100000000; }; }
 
 export const liveShips = (game, role) => game.ships[role].filter(ship => ship.hp > 0);
+export const isMatchOver = game => Boolean(game?.outcome);
 const cloneGame = game => ({ ...game, ships: { host: game.ships.host.map(ship => ({ ...ship })), guest: game.ships.guest.map(ship => ({ ...ship })) }, lastPath: [...game.lastPath], trails: [...(game.trails || [])], blooms: [...(game.blooms || [])] });
-const advanceTurn = (game, role) => { const opponent = ROLES[role]; if (!liveShips(game, opponent).length) game.outcome = role; else { game.turn = opponent; game.round += 1; } };
+const advanceTurn = (game, role) => {
+  const opponent = ROLES[role];
+  if (!liveShips(game, opponent).length) {
+    game.outcome = role;
+    game.endReason = 'fleet-destroyed';
+    game.turn = null;
+  } else {
+    game.turn = opponent;
+    game.round += 1;
+  }
+};
 
 export function applyGameAction(game, action) {
   if (!action || action.type !== 'fire') return { game, ignored: true };
   const { expression, role, shipIndex } = action;
-  if (!game || game.turn !== role || game.outcome || !game.ships[role][shipIndex]?.hp) return { game, ignored: true };
+  if (!game || game.turn !== role || game.pendingShot || isMatchOver(game) || !game.ships[role][shipIndex]?.hp) return { game, ignored: true };
   const next = cloneGame(game);
   const path = trace(expression, next.ships[role][shipIndex], role);
   if (!path.length) { next.turn = ROLES[role]; next.round += 1; return { game: next, unstable: true, hit: false }; }
-  let hit = false, impact = null, resolvedPath = [];
+  let impact = null, resolvedPath = [];
   for (const point of path) {
     resolvedPath.push(point);
     const asteroid = next.asteroids?.find(candidate => Math.hypot(point.x - candidate.x, point.y - candidate.y) < candidate.r);
-    if (asteroid) { next.asteroids = next.asteroids.filter(candidate => candidate !== asteroid); impact = { kind: 'asteroid', x: point.x, y: point.y, seed: asteroid.seed }; break; }
+    if (asteroid) { impact = { kind: 'asteroid', x: point.x, y: point.y, seed: asteroid.seed, asteroidId: asteroid.id }; break; }
     const planet = next.planets.find(candidate => Math.hypot(point.x - candidate.x, point.y - candidate.y) < candidate.r);
     if (planet) { impact = { kind: 'planet', x: point.x, y: point.y, seed: planet.seed }; break; }
-    const target = liveShips(next, ROLES[role]).find(ship => Math.hypot(point.x - ship.x, point.y - ship.y) < SHIP_RADIUS);
-    if (target) { target.hp = 0; hit = true; impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1 }; break; }
+    const targetIndex = next.ships[ROLES[role]].findIndex(ship => ship.hp && Math.hypot(point.x - ship.x, point.y - ship.y) < SHIP_RADIUS);
+    if (targetIndex >= 0) { impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1, shipRole: ROLES[role], shipIndex: targetIndex }; break; }
   }
   const visualPath = impact ? resolvedPath : extendOutboundPath(resolvedPath);
   next.lastPath = resolvedPath; next.shotNumber = (game.shotNumber || 0) + 1;
   // Animation events must be serializable and clock-free. A remote peer cannot
   // safely compare its wall clock to the host's; the renderer begins these
   // shared events when it receives their stable shot id.
-  next.lastShot = { id: next.shotNumber, role, path: visualPath, hit, impact, outbound: !impact };
+  next.lastShot = { id: next.shotNumber, role, path: visualPath, impact, outbound: !impact };
   next.trails = [...(next.trails || []), next.lastShot].slice(-8);
-  if (['planet', 'asteroid', 'ship'].includes(impact?.kind)) next.blooms = [...(next.blooms || []), { id: next.shotNumber, impact }].slice(-8);
-  advanceTurn(next, role);
-  return { game: next, hit, unstable: false };
+  next.pendingShot = { id: next.shotNumber, role, impact };
+  return { game: next, pending: true, unstable: false };
+}
+
+export function resolvePendingShot(game, shotId) {
+  const pendingShot = game?.pendingShot;
+  if (!pendingShot || pendingShot.id !== shotId || isMatchOver(game)) return { game, ignored: true };
+  const next = cloneGame(game), impact = pendingShot.impact;
+  let hit = false;
+  if (impact?.kind === 'asteroid') next.asteroids = next.asteroids.filter(asteroid => asteroid.id !== impact.asteroidId);
+  if (impact?.kind === 'ship') {
+    const ship = next.ships[impact.shipRole]?.[impact.shipIndex];
+    if (ship?.hp) { ship.hp = 0; hit = true; }
+  }
+  if (impact) next.blooms = [...(next.blooms || []), { id: pendingShot.id, impact }].slice(-8);
+  next.pendingShot = null;
+  advanceTurn(next, pendingShot.role);
+  return { game: next, hit, impact, resolved: true };
 }
 
 function extendOutboundPath(path) {
@@ -120,12 +147,17 @@ function extendOutboundPath(path) {
 }
 
 export function createBotAction(game) {
-  if (!game || game.turn !== 'guest' || game.outcome) return null;
+  if (!game || game.turn !== 'guest' || game.pendingShot || isMatchOver(game)) return null;
   const random = Math.random, shooters = game.ships.guest.map((ship, index) => ({ ship, index })).filter(({ ship }) => ship.hp), targets = liveShips(game, 'host');
   const shooter = shooters[Math.floor(random() * shooters.length)], target = targets[Math.floor(random() * targets.length)], solution = solveRoute(game, shooter.ship, target);
   if (solution) {
     if (random() < 0.3) return { type: 'fire', role: 'guest', shipIndex: shooter.index, expression: solution };
-    const shift = (random() < 0.5 ? -1 : 1) * between(random, 0.12, 0.3);
+    // Convert a small world-space miss (roughly one to three ship lengths)
+    // into the local graph coefficient, so long-range targets do not receive
+    // a disproportionately huge shift.
+    const targetX = Math.abs((target.x - shooter.ship.x) / 72);
+    const missDistance = between(random, SHIP_RADIUS * 2, SHIP_RADIUS * 6);
+    const shift = (random() < 0.5 ? -1 : 1) * missDistance / Math.max(targetX * 42, 1);
     return { type: 'fire', role: 'guest', shipIndex: shooter.index, expression: `(${solution})+(${shift.toFixed(3)})*x` };
   }
   return { type: 'fire', role: 'guest', shipIndex: shooter.index, expression: `${(random() < 0.5 ? -0.16 : 0.16)}*x` };

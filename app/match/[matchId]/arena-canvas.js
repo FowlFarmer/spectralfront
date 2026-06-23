@@ -1,14 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SHIP_RADIUS, WORLD } from './game-model';
+import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD } from './game-model';
 
 export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
   const viewport = useRef(null), canvas = useRef(null);
   // Shared game events only carry a stable shot id. Each client owns its
   // animation clock, which avoids assuming its system clock matches the host.
   const eventStarts = useRef(new Map());
-  const [now, setNow] = useState(() => performance.now());
+  const [now, setNow] = useState(() => performance.now()), [cursor, setCursor] = useState(null);
   const eventAge = event => {
     let start = eventStarts.current.get(event.id);
     if (start === undefined) {
@@ -37,7 +37,8 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
     for (const trail of game.trails || []) { const age = eventAge(trail); if (age < TRAIL_DURATION) drawLaserTrail(ctx, trail, age); }
     for (const bloom of game.blooms || []) { const age = eventAge(bloom); if (age >= FLIGHT_TIME && age < SHOT_DURATION) drawImpactBurst(ctx, bloom.impact, age - FLIGHT_TIME); }
     for (const [shipRole, ships] of Object.entries(game.ships)) for (const ship of ships) { if (!ship.hp) continue; ctx.save(); ctx.translate(ship.x, ship.y); ctx.fillStyle = shipRole === 'host' ? '#5fe2d4' : '#f27b82'; ctx.beginPath(); ctx.moveTo(shipRole === 'host' ? SHIP_RADIUS : -SHIP_RADIUS, 0); ctx.lineTo(shipRole === 'host' ? -6 : 6, -4); ctx.lineTo(shipRole === 'host' ? -3 : 3, 0); ctx.lineTo(shipRole === 'host' ? -6 : 6, 4); ctx.closePath(); ctx.fill(); ctx.restore(); }
-  }, [game, now, role, selected]);
+    if (cursor) drawCursorReadout(ctx, cursor, origin, bounds);
+  }, [cursor, game, now, role, selected]);
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => { const element = viewport.current; if (!element) return; const observer = new ResizeObserver(draw); observer.observe(element); return () => observer.disconnect(); }, [draw]);
   useEffect(() => {
@@ -55,11 +56,19 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
   }, [game.trails, game.blooms]);
-  const selectShipAt = event => { const element = canvas.current, bounds = element.getBoundingClientRect(), x = (event.clientX - bounds.left) / bounds.width * WORLD.width, y = (event.clientY - bounds.top) / bounds.height * WORLD.height; const index = game.ships[role].findIndex(ship => ship.hp && Math.hypot(ship.x - x, ship.y - y) <= SHIP_RADIUS + 7); if (index >= 0) onSelectShip(index); };
-  return <div className="canvas-stage" ref={viewport}><canvas ref={canvas} aria-label="Match arena" onClick={selectShipAt} /></div>;
+  const selectShipAt = event => { const point = pointerToWorld(event, canvas.current), index = game.ships[role].findIndex(ship => ship.hp && Math.hypot(ship.x - point.x, ship.y - point.y) <= SHIP_RADIUS + 7); if (index >= 0) onSelectShip(index); };
+  const trackCursor = event => setCursor(pointerToWorld(event, canvas.current));
+  return <div className="canvas-stage" ref={viewport}><canvas ref={canvas} aria-label="Match arena" onClick={selectShipAt} onPointerMove={trackCursor} onPointerLeave={() => setCursor(null)} /></div>;
 }
 
-const FLIGHT_TIME = 195, BLOOM_DURATION = 5200, SHOT_DURATION = FLIGHT_TIME + BLOOM_DURATION, TRAIL_FADE_TIME = 4200, TRAIL_DURATION = FLIGHT_TIME + TRAIL_FADE_TIME;
+const FLIGHT_TIME = SHOT_FLIGHT_MS, BLOOM_DURATION = 5200, SHOT_DURATION = FLIGHT_TIME + BLOOM_DURATION, TRAIL_FADE_TIME = 4200, TRAIL_DURATION = FLIGHT_TIME + TRAIL_FADE_TIME;
+function pointerToWorld(event, element) { const bounds = element.getBoundingClientRect(); return { x: Math.max(0, Math.min(WORLD.width, (event.clientX - bounds.left) / bounds.width * WORLD.width)), y: Math.max(0, Math.min(WORLD.height, (event.clientY - bounds.top) / bounds.height * WORLD.height)) }; }
+function drawCursorReadout(ctx, cursor, origin, bounds) {
+  ctx.save(); ctx.font = '10px DM Mono'; ctx.textBaseline = 'middle';
+  const xValue = origin ? (cursor.x - origin.x) / 72 : cursor.x, yValue = origin ? (origin.y - cursor.y) / 42 : WORLD.height - cursor.y, text = `x ${formatCoordinate(xValue)}   y ${formatCoordinate(yValue)}`, paddingX = 8, height = 21, width = ctx.measureText(text).width + paddingX * 2, offsetX = 12 / bounds.width * WORLD.width, offsetY = 17 / bounds.height * WORLD.height, x = Math.min(cursor.x + offsetX, WORLD.width - width - 3), y = Math.min(cursor.y + offsetY, WORLD.height - height - 3);
+  ctx.fillStyle = '#05111ce8'; ctx.strokeStyle = '#58e7dcaa'; ctx.lineWidth = 0.75; ctx.fillRect(x, y, width, height); ctx.strokeRect(x, y, width, height); ctx.fillStyle = '#cffffa'; ctx.fillText(text, x + paddingX, y + height / 2 + 0.5); ctx.restore();
+}
+function formatCoordinate(value) { const rounded = Math.abs(value) < 0.005 ? 0 : value; return `${rounded >= 0 ? '+' : ''}${rounded.toFixed(2)}`; }
 function drawLaserTrail(ctx, trail, age) {
   const { path, hit } = trail;
   if (path.length < 2) return;
