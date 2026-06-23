@@ -460,4 +460,44 @@ export function trace(source, ship, role, maxDistance = MAX_BEAM_DISTANCE) {
   return path;
 }
 
-function compileExpression(source) { const tokens = source.toLowerCase().match(/\s*(\d*\.?\d+|pi|x|sin|cos|tan|abs|sqrt|log|exp|[()+\-*/^])/g)?.map(token => token.trim()); if (!tokens?.length || tokens.join('') !== source.toLowerCase().replace(/\s/g, '')) throw Error(); const out = [], ops = [], precedence = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 }, functions = ['sin', 'cos', 'tan', 'abs', 'sqrt', 'log', 'exp']; let expect = true; for (const token of tokens) { if (/^\d|^(x|pi)$/.test(token)) { out.push(token); expect = false; continue; } if (functions.includes(token)) { ops.push(token); continue; } if (token === '(') { ops.push(token); expect = true; continue; } if (token === ')') { while (ops.length && ops.at(-1) !== '(') out.push(ops.pop()); if (ops.pop() !== '(') throw Error(); if (functions.includes(ops.at(-1))) out.push(ops.pop()); expect = false; continue; } if (token === '-' && expect) out.push('0'); if (!precedence[token]) throw Error(); while (ops.length && precedence[ops.at(-1)] && (token === '^' ? precedence[token] < precedence[ops.at(-1)] : precedence[token] <= precedence[ops.at(-1)])) out.push(ops.pop()); ops.push(token); expect = true; } while (ops.length) { const token = ops.pop(); if (token === '(') throw Error(); out.push(token); } return x => { const stack = []; for (const token of out) { if (/^\d/.test(token)) stack.push(+token); else if (token === 'x') stack.push(x); else if (token === 'pi') stack.push(Math.PI); else if (functions.includes(token)) { const value = stack.pop(); stack.push(Math[token === 'log' ? 'log' : token](value)); } else { const b = stack.pop(), a = stack.pop(); stack.push(token === '+' ? a + b : token === '-' ? a - b : token === '*' ? a * b : token === '/' ? a / b : Math.pow(a, b)); } } return stack.length === 1 ? stack[0] : NaN; }; }
+function compileExpression(source) {
+  const functions = ['sin', 'cos', 'tan', 'abs', 'sqrt', 'log', 'exp'];
+  const rawTokens = source.toLowerCase().match(/\s*(\d*\.?\d+|pi|x|sin|cos|tan|abs|sqrt|log|exp|[()+\-*/^])/g)?.map(token => token.trim());
+  if (!rawTokens?.length || rawTokens.join('') !== source.toLowerCase().replace(/\s/g, '')) throw Error();
+  const tokens = insertImplicitMultiplication(rawTokens, functions), out = [], ops = [], precedence = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 };
+  let expect = true;
+  for (const token of tokens) {
+    if (/^\d|^(x|pi)$/.test(token)) { out.push(token); expect = false; continue; }
+    if (functions.includes(token)) { ops.push(token); continue; }
+    if (token === '(') { ops.push(token); expect = true; continue; }
+    if (token === ')') { while (ops.length && ops.at(-1) !== '(') out.push(ops.pop()); if (ops.pop() !== '(') throw Error(); if (functions.includes(ops.at(-1))) out.push(ops.pop()); expect = false; continue; }
+    if (token === '-' && expect) out.push('0');
+    if (!precedence[token]) throw Error();
+    while (ops.length && precedence[ops.at(-1)] && (token === '^' ? precedence[token] < precedence[ops.at(-1)] : precedence[token] <= precedence[ops.at(-1)])) out.push(ops.pop());
+    ops.push(token); expect = true;
+  }
+  while (ops.length) { const token = ops.pop(); if (token === '(') throw Error(); out.push(token); }
+  return x => {
+    const stack = [];
+    for (const token of out) {
+      if (/^\d/.test(token)) stack.push(+token);
+      else if (token === 'x') stack.push(x);
+      else if (token === 'pi') stack.push(Math.PI);
+      else if (functions.includes(token)) { const value = stack.pop(); if (value === undefined) return NaN; stack.push(Math[token](value)); }
+      else { const b = stack.pop(), a = stack.pop(); if (a === undefined || b === undefined) return NaN; stack.push(token === '+' ? a + b : token === '-' ? a - b : token === '*' ? a * b : token === '/' ? a / b : Math.pow(a, b)); }
+    }
+    return stack.length === 1 ? stack[0] : NaN;
+  };
+}
+
+function insertImplicitMultiplication(tokens, functions) {
+  const isValueEnd = token => /^\d/.test(token) || token === 'x' || token === 'pi' || token === ')';
+  const isValueStart = token => /^\d/.test(token) || token === 'x' || token === 'pi' || token === '(' || functions.includes(token);
+  const normalized = [];
+  for (const token of tokens) {
+    const previous = normalized.at(-1);
+    if (previous && isValueEnd(previous) && isValueStart(token)) normalized.push('*');
+    normalized.push(token);
+  }
+  return normalized;
+}

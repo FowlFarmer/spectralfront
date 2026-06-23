@@ -206,7 +206,7 @@ export default function GameClient({ matchId }) {
             <div className="label">ENERGY</div>
             <div className="energy-bar" aria-label={`Energy ${Math.round(myEnergy)} of ${ENERGY_MAX}`}>
               <div className="energy-fill" style={{ width: `${(myEnergy / ENERGY_MAX) * 100}%` }} />
-              <span>{Math.round(myEnergy)} / {ENERGY_MAX}</span>
+              <span><b>ENERGY</b>{Math.round(myEnergy)}<i>/ {ENERGY_MAX}</i></span>
             </div>
           </div>
           <div>
@@ -228,7 +228,7 @@ export default function GameClient({ matchId }) {
               <div className="formula-row"><span>y =</span><input value={formula} disabled={matchOver} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
               <div className="power-control">
                 <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange}u range · {Math.round(fireCost)} energy</label>
-                <input id="beam-power" type="range" min="5" max="100" value={power} disabled={matchOver} onChange={event => setPower(+event.target.value)} />
+                <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={matchOver} onChange={event => setPower(+event.target.value)} />
               </div>
               <div className="hint">{matchOver ? 'Command channel closed.' : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship (0, 0) · sin, cos, abs, sqrt, log, exp'}</div>
               {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={matchOver} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
