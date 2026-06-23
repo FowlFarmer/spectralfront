@@ -63,7 +63,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
       for (let index = 0; index < ships.length; index += 1) {
         const ship = ships[index];
         if (!ship.hp) continue;
-        const displayAngle = updateDisplayAngle(displayAngles.current, `${shipRole}-${index}`, ship, mirrored, dtSec);
+        const displayAngle = updateDisplayAngle(displayAngles.current, `${shipRole}-${index}`, ship, dtSec);
         drawShip(ctx, ship, shipRole, displayAngle);
       }
     }
@@ -87,7 +87,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
       const start = eventStarts.current.get(bloom.id);
       return start !== undefined && time - start < flightTime + BLOOM_DURATION;
     });
-    const needsAnimation = time => hasActiveEvent(time) || shipsNeedRotationTick(game, displayAngles.current, mirrored);
+    const needsAnimation = time => hasActiveEvent(time) || shipsNeedRotationTick(game, displayAngles.current);
     if (!needsAnimation(startedAt)) return;
     let frame;
     const tick = () => {
@@ -174,33 +174,33 @@ function lerpAngle(current, target, maxDelta) {
   return current + Math.sign(diff) * maxDelta;
 }
 
-function shipTargetAngle(ship, mirrored) {
+function shipTargetAngle(ship) {
   const speed = Math.hypot(ship.vx, ship.vy);
-  if (speed > 0.02) return mirrored ? Math.atan2(ship.vy, -ship.vx) : Math.atan2(ship.vy, ship.vx);
+  if (speed > 0.02) return Math.atan2(ship.vy, ship.vx);
   if (ship.waypoint && ship.moving) {
     const dx = ship.waypoint.x - ship.x, dy = ship.waypoint.y - ship.y;
-    if (Math.hypot(dx, dy) > 0.1) return mirrored ? Math.atan2(dy, -dx) : Math.atan2(dy, dx);
+    if (Math.hypot(dx, dy) > 0.1) return Math.atan2(dy, dx);
   }
   return null;
 }
 
-function updateDisplayAngle(store, key, ship, mirrored, dtSec) {
+function updateDisplayAngle(store, key, ship, dtSec) {
   let current = store.get(key);
   if (current === undefined) current = ship.angle;
-  const target = shipTargetAngle(ship, mirrored);
+  const target = shipTargetAngle(ship);
   if (target !== null) current = lerpAngle(current, target, SHIP_TURN_RATE * dtSec);
   store.set(key, current);
   return current;
 }
 
-function shipsNeedRotationTick(game, displayAngles, mirrored) {
+function shipsNeedRotationTick(game, displayAngles) {
   if (!game?.ships) return false;
   for (const [shipRole, ships] of Object.entries(game.ships)) {
     for (let index = 0; index < ships.length; index += 1) {
       const ship = ships[index];
       if (!ship?.hp) continue;
       if (ship.moving || ship.braking || Math.hypot(ship.vx, ship.vy) > 0.02) return true;
-      const target = shipTargetAngle(ship, mirrored);
+      const target = shipTargetAngle(ship);
       if (target === null) continue;
       const current = displayAngles.get(`${shipRole}-${index}`) ?? ship.angle;
       if (Math.abs(shortestAngleDiff(current, target)) > 0.015) return true;
