@@ -1,4 +1,6 @@
 export const WORLD = Object.freeze({ width: 1000, height: 600, grid: 50 });
+// Rendering and simulation use world units; one background grid square is one graph unit.
+export const WORLD_UNITS_PER_GRAPH_UNIT = WORLD.grid;
 export const SHIP_RADIUS = 8;
 export const SHOT_FLIGHT_MS = 195;
 export const BEAM_TRAVEL_SPEED = 2400;
@@ -13,6 +15,7 @@ export const SHIP_MAX_SPEED = 2.13;
 export const SHIP_ACCEL = 1.47;
 export const SHIP_DECEL = 1.2;
 export const SIM_TICK_MS = 50;
+export const MATCH_COUNTDOWN_MS = 12_000;
 export const BOT_OPENING_SHOT_DELAY_MS = 10_000;
 export const BOT_SHOT_COOLDOWN_MS = 5_000;
 
@@ -22,6 +25,8 @@ const SHIP_CLEARANCE = SHIP_RADIUS * 6, PLANET_CLEARANCE = 32;
 
 export const fireEnergyCost = power => 6 + (power / 100) * 54;
 export const beamDistanceForPower = power => Math.max(0, power) * BEAM_DISTANCE_PER_POWER;
+export const worldDistanceToGraphUnits = distance => distance / WORLD_UNITS_PER_GRAPH_UNIT;
+export const graphUnitsToWorldDistance = distance => distance * WORLD_UNITS_PER_GRAPH_UNIT;
 export const beamFlightDuration = pathLength => Math.max(90, Math.min(320, (pathLength / BEAM_TRAVEL_SPEED) * 1000));
 export const mirrorWorldX = x => WORLD.width - x;
 export const measurePathLength = path => {
@@ -32,7 +37,7 @@ export const measurePathLength = path => {
 
 export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { botMatch = false } = {}) => {
   const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets);
-  return { seed, simTime: 0, outcome: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), lastPath: [], lastShot: null, trails: [], blooms: [], energy: { host: ENERGY_MAX, guest: ENERGY_MAX }, energyRegen: { host: ENERGY_REGEN, guest: botMatch ? BOT_ENERGY_REGEN : ENERGY_REGEN }, ships, planets, asteroids };
+  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), lastPath: [], lastShot: null, trails: [], blooms: [], energy: { host: 0, guest: 0 }, energyRegen: { host: ENERGY_REGEN, guest: botMatch ? BOT_ENERGY_REGEN : ENERGY_REGEN }, ships, planets, asteroids };
 };
 
 function createShip(x, y, role) {
@@ -148,8 +153,15 @@ export function advanceSimulation(game, deltaMs) {
   if (!game || isMatchOver(game)) return { game, events: [] };
   const next = cloneGame(game);
   next.simTime = (game.simTime || 0) + deltaMs;
-  const dtSec = deltaMs / 1000;
+  let activeDeltaMs = deltaMs;
   const events = [];
+  if (next.phase === 'countdown') {
+    if (next.simTime < (next.countdownMs ?? MATCH_COUNTDOWN_MS)) return { game: next, events };
+    activeDeltaMs = Math.max(0, next.simTime - (next.countdownMs ?? MATCH_COUNTDOWN_MS));
+    next.phase = 'live';
+    events.push({ key: 'combatStarted' });
+  }
+  const dtSec = activeDeltaMs / 1000;
   for (const role of ['host', 'guest']) {
     next.energy[role] = Math.min(ENERGY_MAX, next.energy[role] + (next.energyRegen?.[role] ?? ENERGY_REGEN) * dtSec);
     for (const ship of next.ships[role]) {
@@ -220,6 +232,7 @@ function applyDeceleration(ship, dtSec, minSpeed) {
 
 export function applyGameAction(game, action) {
   if (!action || isMatchOver(game)) return { game, ignored: true };
+  if (game.phase !== 'live') return { game, ignored: true, reason: 'countdown' };
   if (action.type === 'fire') return applyFire(game, action);
   if (action.type === 'move') return applyMove(game, action);
   if (action.type === 'cancelMove') return applyCancelMove(game, action);
@@ -323,7 +336,7 @@ function hitsObstacle(game, point) {
 }
 
 export function createBotAction(game) {
-  if (!game || isMatchOver(game)) return null;
+  if (!game || isMatchOver(game) || game.phase !== 'live') return null;
   const energy = game.energy.guest;
   const shooters = game.ships.guest.map((ship, index) => ({ ship, index })).filter(({ ship }) => ship.hp);
   if (!shooters.length) return null;
@@ -340,7 +353,8 @@ export function createBotAction(game) {
     if (waypoint) return { type: 'move', role: 'guest', shipIndex: rover.index, x: waypoint.x, y: waypoint.y, botRoam: true, nextRoamAfter: 3 + Math.floor(Math.random() * 2) };
   }
 
-  const canFire = game.simTime >= BOT_OPENING_SHOT_DELAY_MS && (game.botLastShotAt === null || game.simTime - game.botLastShotAt >= BOT_SHOT_COOLDOWN_MS);
+  const combatTime = Math.max(0, game.simTime - (game.countdownMs ?? MATCH_COUNTDOWN_MS));
+  const canFire = combatTime >= BOT_OPENING_SHOT_DELAY_MS && (game.botLastShotAt === null || game.simTime - game.botLastShotAt >= BOT_SHOT_COOLDOWN_MS);
   for (const { ship, index } of shuffle(shooters)) {
     const target = targets[Math.floor(Math.random() * targets.length)];
     const shot = findBestShot(game, ship, index, target, energy);
@@ -374,9 +388,9 @@ function findBestShot(game, shooter, shipIndex, target, energy) {
   const power = Math.min(100, Math.max(40, Math.round((Math.hypot(target.x - shooter.x, target.y - shooter.y) / MAX_BEAM_DISTANCE) * 100 + 15)));
   if (energy < fireEnergyCost(power)) return null;
   if (Math.random() < 0.32) return { type: 'fire', role: 'guest', shipIndex, expression: solution, power };
-  const targetX = Math.abs((target.x - shooter.x) / 72);
+  const targetX = Math.abs(worldDistanceToGraphUnits(target.x - shooter.x));
   const missDistance = SHIP_RADIUS * 2 + Math.random() * (SHIP_RADIUS * 4);
-  const shift = (Math.random() < 0.5 ? -1 : 1) * missDistance / Math.max(targetX * 42, 1);
+  const shift = (Math.random() < 0.5 ? -1 : 1) * missDistance / Math.max(targetX * WORLD_UNITS_PER_GRAPH_UNIT, 1);
   return { type: 'fire', role: 'guest', shipIndex, expression: `(${solution})+(${shift.toFixed(3)})*x`, power };
 }
 
@@ -402,7 +416,7 @@ function findTacticalWaypoint(game, shooter, target) {
 }
 
 function solveRoute(game, shooter, target) {
-  const targetX = (target.x - shooter.x) / 72, targetY = (shooter.y - target.y) / 42;
+  const targetX = worldDistanceToGraphUnits(target.x - shooter.x), targetY = worldDistanceToGraphUnits(shooter.y - target.y);
   if (Math.abs(targetX) < 0.05) return null;
   const slope = targetY / targetX;
   const curvatures = shuffle([-1.5, -1.1, -0.8, -0.55, -0.32, -0.18, 0, 0.18, 0.32, 0.55, 0.8, 1.1, 1.5]);
@@ -440,8 +454,9 @@ export function trace(source, ship, role, maxDistance = MAX_BEAM_DISTANCE) {
   const originValue = fn(0); if (!Number.isFinite(originValue)) return [];
   const direction = role === 'host' ? 1 : -1, path = [];
   let traveled = 0, previous = null;
+  const graphLimit = Math.ceil(Math.hypot(WORLD.width, WORLD.height) / WORLD_UNITS_PER_GRAPH_UNIT) + 2;
   for (let index = 0; index < 520; index += 1) {
-    const x = direction * (index / 519) * 12, y = fn(x) - originValue, worldX = ship.x + x * 72, worldY = ship.y - y * 42;
+    const x = direction * (index / 519) * graphLimit, y = fn(x) - originValue, worldX = ship.x + graphUnitsToWorldDistance(x), worldY = ship.y - graphUnitsToWorldDistance(y);
     if (!Number.isFinite(y) || Math.abs(y) > 30 || worldY < 0 || worldY > WORLD.height || worldX < 0 || worldX > WORLD.width) break;
     const point = { x: worldX, y: worldY };
     if (previous) {
@@ -461,8 +476,9 @@ export function trace(source, ship, role, maxDistance = MAX_BEAM_DISTANCE) {
 }
 
 function compileExpression(source) {
-  const functions = ['sin', 'cos', 'tan', 'abs', 'sqrt', 'log', 'exp'];
-  const rawTokens = source.toLowerCase().match(/\s*(\d*\.?\d+|pi|x|sin|cos|tan|abs|sqrt|log|exp|[()+\-*/^])/g)?.map(token => token.trim());
+  const functionMap = { sin: Math.sin, cos: Math.cos, tan: Math.tan, abs: Math.abs, sqrt: Math.sqrt, log: Math.log, ln: Math.log, exp: Math.exp };
+  const functions = Object.keys(functionMap);
+  const rawTokens = source.toLowerCase().match(/\s*(\d*\.?\d+|pi|x|sin|cos|tan|abs|sqrt|log|ln|exp|[()+\-*/^])/g)?.map(token => token.trim());
   if (!rawTokens?.length || rawTokens.join('') !== source.toLowerCase().replace(/\s/g, '')) throw Error();
   const tokens = insertImplicitMultiplication(rawTokens, functions), out = [], ops = [], precedence = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 };
   let expect = true;
@@ -483,7 +499,7 @@ function compileExpression(source) {
       if (/^\d/.test(token)) stack.push(+token);
       else if (token === 'x') stack.push(x);
       else if (token === 'pi') stack.push(Math.PI);
-      else if (functions.includes(token)) { const value = stack.pop(); if (value === undefined) return NaN; stack.push(Math[token](value)); }
+      else if (functions.includes(token)) { const value = stack.pop(); if (value === undefined) return NaN; stack.push(functionMap[token](value)); }
       else { const b = stack.pop(), a = stack.pop(); if (a === undefined || b === undefined) return NaN; stack.push(token === '+' ? a + b : token === '-' ? a - b : token === '*' ? a * b : token === '/' ? a / b : Math.pow(a, b)); }
     }
     return stack.length === 1 ? stack[0] : NaN;

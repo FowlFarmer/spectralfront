@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD, beamDistanceForPower, mirrorWorldX, trace } from './game-model';
+import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD, beamDistanceForPower, mirrorWorldX, trace, worldDistanceToGraphUnits } from './game-model';
 
 export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', power = 100, previewDisabled = false }) {
   const viewport = useRef(null), canvas = useRef(null);
@@ -270,7 +270,8 @@ function drawWaypoint(ctx, ship, waypoint, hovered) {
 
 function drawCursorReadout(ctx, cursor, origin, bounds) {
   ctx.save(); ctx.font = '10px DM Mono'; ctx.textBaseline = 'middle';
-  const xValue = origin ? (cursor.x - origin.x) / 72 : cursor.x, yValue = origin ? (origin.y - cursor.y) / 42 : WORLD.height - cursor.y;
+  const xValue = origin ? worldDistanceToGraphUnits(cursor.x - origin.x) : worldDistanceToGraphUnits(cursor.x);
+  const yValue = origin ? worldDistanceToGraphUnits(origin.y - cursor.y) : worldDistanceToGraphUnits(WORLD.height - cursor.y);
   const text = `x ${formatCoordinate(xValue)}   y ${formatCoordinate(yValue)}`, paddingX = 8, height = 21, width = ctx.measureText(text).width + paddingX * 2;
   const offsetX = 12 / bounds.width * WORLD.width, offsetY = 17 / bounds.height * WORLD.height;
   const x = Math.min(cursor.x + offsetX, WORLD.width - width - 3), y = Math.min(cursor.y + offsetY, WORLD.height - height - 3);

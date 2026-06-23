@@ -13,8 +13,10 @@ import {
   fireEnergyCost,
   isMatchOver,
   liveShips,
+  MATCH_COUNTDOWN_MS,
   MOVE_INITIAL_COST,
   SIM_TICK_MS,
+  worldDistanceToGraphUnits,
 } from './game-model';
 import { notificationFor } from './notification-config';
 
@@ -51,7 +53,7 @@ export default function GameClient({ matchId }) {
     if (!notification) return;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setNotices(queue => [...queue, { id, ...notification }].slice(-4));
-    noticeTimers.current.set(id, window.setTimeout(() => { setNotices(queue => queue.filter(notice => notice.id !== id)); noticeTimers.current.delete(id); }, 3800));
+    noticeTimers.current.set(id, window.setTimeout(() => { setNotices(queue => queue.filter(notice => notice.id !== id)); noticeTimers.current.delete(id); }, 15_000));
   }, []);
   const clearNotices = useCallback(() => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); noticeTimers.current.clear(); setNotices([]); }, []);
   const restartBotMatch = useCallback(() => {
@@ -68,6 +70,7 @@ export default function GameClient({ matchId }) {
       if (result.blocked) pushNotice('pathBlocked');
       else if (result.reason === 'lowEnergyFire') pushNotice('notEnoughEnergyFire');
       else if (result.reason === 'lowEnergyMove') pushNotice('notEnoughEnergyMove');
+      else if (result.reason === 'countdown') pushNotice('combatStaging');
       return null;
     }
     if (action.type === 'fire' && action.role === session.current?.role) rememberArc(action.expression);
@@ -82,12 +85,16 @@ export default function GameClient({ matchId }) {
   const notifyEvents = useCallback(events => {
     const me = session.current?.role;
     for (const event of events || []) {
-      if (event.role === me) pushNotice(event.key);
+      if (!event.role || event.role === me) pushNotice(event.key);
     }
   }, [pushNotice]);
 
   const submitAction = useCallback(action => {
     const me = session.current?.role;
+    if (gameRef.current?.phase !== 'live') {
+      pushNotice('combatStaging');
+      return;
+    }
     if (action.type === 'fire' && gameRef.current?.energy[me] < fireEnergyCost(action.power ?? 100)) {
       pushNotice('notEnoughEnergyFire');
       return;
@@ -146,12 +153,12 @@ export default function GameClient({ matchId }) {
   useEffect(() => {
     clearTimeout(botTimer.current);
     const tickKey = game ? `${game.seed}:${botDecisionWindow}` : null;
-    if (!isBotMatch || isMatchOver(game)) { botTickKey.current = null; return; }
+    if (!isBotMatch || isMatchOver(game) || game?.phase !== 'live') { botTickKey.current = null; return; }
     if (botTickKey.current === tickKey) return;
     botTickKey.current = tickKey;
     botTimer.current = window.setTimeout(() => takeBotTurn(tickKey), 150 + Math.random() * 180);
     return () => { clearTimeout(botTimer.current); if (botTickKey.current === tickKey) botTickKey.current = null; };
-  }, [botDecisionWindow, game?.outcome, game?.seed, isBotMatch, takeBotTurn]);
+  }, [botDecisionWindow, game?.outcome, game?.phase, game?.seed, isBotMatch, takeBotTurn]);
 
   const connect = useCallback(async () => {
     if (isBotMatch) { session.current = { role: 'host' }; setLink('BOT UPLINK'); publish(createMatch(undefined, { botMatch: true })); return; }
@@ -160,12 +167,12 @@ export default function GameClient({ matchId }) {
     try {
       const { iceServers } = await request(`/api/ice?ticket=${encodeURIComponent(stored.ticket)}`), pc = peer.current = new RTCPeerConnection({ iceServers });
       pc.onicecandidate = event => event.candidate && request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'candidate', candidate: event.candidate } }) });
-      const reportDisconnect = () => { if (!isMatchOver(gameRef.current)) setProblem('Connection lost. The other pilot or their network left the duel.'); };
+      const reportDisconnect = () => { if (!isMatchOver(gameRef.current)) setProblem('Connection lost. The other commander or their network left the duel.'); };
       pc.onconnectionstatechange = () => { if (['failed', 'disconnected'].includes(pc.connectionState)) reportDisconnect(); };
       const open = dataChannel => {
         channel.current = dataChannel;
         dataChannel.onopen = () => { setLink('DIRECT LINK'); if (stored.role === 'host') { const initial = createMatch(); send({ type: 'state', state: initial }); publish(initial); } };
-        dataChannel.onclose = () => { if (!isMatchOver(gameRef.current)) setProblem('The other pilot left the duel.'); };
+        dataChannel.onclose = () => { if (!isMatchOver(gameRef.current)) setProblem('The other commander left the duel.'); };
         dataChannel.onmessage = event => {
           const message = JSON.parse(event.data);
           if (message.type === 'state') {
@@ -178,7 +185,7 @@ export default function GameClient({ matchId }) {
       pc.ondatachannel = event => open(event.channel);
       if (stored.role === 'host') { open(pc.createDataChannel('match', { ordered: true })); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'offer', sdp: offer } }) }); }
       let cancelled = false;
-      (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { await pc.setRemoteDescription(message.sdp); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); } if (message.type === 'answer' && stored.role === 'host') await pc.setRemoteDescription(message.sdp); if (message.type === 'candidate') await pc.addIceCandidate(message.candidate).catch(() => {}); if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) setProblem('The other pilot left the duel.'); } } catch {} await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
+      (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { await pc.setRemoteDescription(message.sdp); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); } if (message.type === 'answer' && stored.role === 'host') await pc.setRemoteDescription(message.sdp); if (message.type === 'candidate') await pc.addIceCandidate(message.candidate).catch(() => {}); if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) setProblem('The other commander left the duel.'); } } catch {} await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
       return () => { cancelled = true; };
     } catch (error) { setProblem(error.message); }
   }, [commitAction, isBotMatch, matchId, notifyEvents, publish, router, send]);
@@ -188,11 +195,13 @@ export default function GameClient({ matchId }) {
 
   if (!game || problem) return <div className="game-shell"><header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div></header><section className="disconnected standalone"><div>{!problem && <div className="spinner" />}<h2>{problem ? 'Match unavailable' : 'Setting up the duel'}</h2><p>{problem || 'Securing a direct browser connection…'}</p><button className="primary" onClick={leave}>BACK TO LOBBY</button></div></section></div>;
 
-  const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], matchOver = isMatchOver(game), won = game.outcome === me;
-  const myEnergy = game.energy[me], fireCost = fireEnergyCost(power), beamRange = Math.round(beamDistanceForPower(power));
-  const canFire = !matchOver && myShips[selected]?.hp && myEnergy >= fireCost;
+  const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], matchOver = isMatchOver(game), combatActive = game.phase === 'live', won = game.outcome === me;
+  const myEnergy = game.energy[me], fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
+  const countdownSeconds = Math.max(0, Math.ceil(((game.countdownMs ?? MATCH_COUNTDOWN_MS) - (game.simTime || 0)) / 1000));
+  const canFire = combatActive && !matchOver && myShips[selected]?.hp && myEnergy >= fireCost;
   const fireCurrent = () => {
     if (matchOver || !myShips[selected]?.hp) return;
+    if (!combatActive) { pushNotice('combatStaging'); return; }
     if (myEnergy < fireCost) { pushNotice('notEnoughEnergyFire'); return; }
     submitAction({ type: 'fire', role: me, shipIndex: selected, expression: formula, power });
   };
@@ -210,35 +219,40 @@ export default function GameClient({ matchId }) {
             </div>
           </div>
           <div>
-            <div className="player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · CLICK SPACE TO MOVE'}</small>
+            <div className="player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · LEFT CLICK TO MOVE'}</small>
               <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || matchOver} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button>)}</div>
             </div>
             <div className="player enemy"><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'NAVIGATION AI' : 'OPPOSING FLEET'}</small><div className="dots">{'● '.repeat(liveShips(game, foe).length) || '—'}</div></div>
           </div>
-          <div className="rules">Live combat — energy regenerates slowly. Click space to move a selected ship; click again to stop. Your fleet always appears on the left.</div>
+          <div className="rules">{combatActive ? 'Live combat — energy regenerates slowly. Left click to move a selected ship; click the waypoint to stop. Your fleet always appears on the left.' : 'Staging sequence — systems remain locked until the launch signal.'}</div>
         </aside>
         <section className="panel arena-wrap">
-          <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : `LIVE · ${Math.round((game.simTime || 0) / 1000)}s`}</span></div>
-          <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={handleMove} onCancelMove={handleCancelMove} matchOver={matchOver} expression={formula} power={power} previewDisabled={matchOver} />
+          <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : combatActive ? `LIVE · ${Math.round((game.simTime || 0) / 1000)}s` : 'STAGING SEQUENCE'}</span></div>
+          <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={matchOver} expression={formula} power={power} previewDisabled={matchOver || !combatActive} />
           <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
+          {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
           {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} onRestart={restartBotMatch} onLeave={leave} />}
           <section className="command">
             <div className="formula">
               <label>FIRING ARC — Y = F(X)</label>
               <div className="formula-row"><span>y =</span><input value={formula} disabled={matchOver} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
               <div className="power-control">
-                <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange}u range · {Math.round(fireCost)} energy</label>
+                <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange} graph units · {Math.round(fireCost)} energy</label>
                 <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={matchOver} onChange={event => setPower(+event.target.value)} />
               </div>
-              <div className="hint">{matchOver ? 'Command channel closed.' : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship (0, 0) · sin, cos, abs, sqrt, log, exp'}</div>
+              <div className="hint">{matchOver ? 'Command channel closed.' : !combatActive ? `Systems unlock in ${countdownSeconds}s. Set an arc while you wait.` : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship (0, 0) · sin, cos, tan, abs, sqrt, log/ln, exp'}</div>
               {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={matchOver} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
             </div>
-            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM'}</button>
+            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : !combatActive ? 'SYSTEMS ARMING' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM'}</button>
           </section>
         </section>
       </main>
     </div>
   );
+}
+
+function LaunchCountdown({ seconds }) {
+  return <section className="launch-countdown" aria-live="polite"><div className="launch-kicker">ENGAGEMENT WINDOW</div><output>{seconds}</output><p>Fleet synchronized · energy reserves empty</p></section>;
 }
 
 function MatchConclusion({ won, isBotMatch, myRemaining, foeRemaining, onRestart, onLeave }) {

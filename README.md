@@ -4,7 +4,7 @@ Spectral Front is a small tactical artillery game built with Next.js. Each playe
 
 It supports two match modes:
 
-- **Live match** — anonymous, peer-to-peer 1v1 play. Redis coordinates matchmaking and WebRTC signaling; the match state travels over a WebRTC data channel.
+- **Live match** — anonymous, peer-to-peer 1v1 play. Choose the public queue or create/join a private lobby with a six-character code. Redis coordinates pairing and WebRTC signaling; the match state travels over a WebRTC data channel.
 - **Bot training** — an immediate, local match against a basic tactical bot. It does not use Redis, signaling, or WebRTC.
 
 ## Run locally
@@ -44,6 +44,7 @@ npm run start  # Serve a production build
 ### Live combat
 
 - There are **no turns**. Both players act at the same time, limited only by energy and match state.
+- Every match begins with a synchronized **12-second staging countdown**. Ships spawn with zero energy; weapons and movement are locked until the launch signal, then energy begins regenerating.
 - Each player has a shared **energy pool** (100 max, regenerates at **4/sec**). In bot training, the bot pool regenerates at **2/sec**.
 - Firing and movement both consume energy. You can fire again immediately after a shot as long as you have enough energy — beam animations are visual only and do not lock input.
 
@@ -52,7 +53,8 @@ npm run start  # Serve a production build
 - Select a surviving ship, enter a permitted mathematical expression for `y = f(x)`, and set **beam power** (5–100%).
 - The selected ship is `(0, 0)` in the expression’s local coordinate system.
 - Constant vertical offsets are normalized away, so every trajectory begins at its selected ship even when the entered function contains a constant term.
-- **Power sets range and cost**: beam travel distance is `power × 40` world units along the traced arc; energy cost is `6 + (power / 100) × 54`.
+- Every background grid square is **one graph unit**. The selected ship is the graph origin, so the hover readout, `x`, and `y` in an expression all use the same scale.
+- **Power sets range and cost**: beam travel distance is `power × 0.8` graph units along the traced arc; energy cost is `6 + (power / 100) × 54`.
 - A dotted **trajectory preview** shows the first portion of the current arc from the selected ship.
 - A trajectory stops at planets and their orbiting moons, destroys asteroids on contact, and destroys one ship on a direct hit. Collisions resolve **immediately** when the shot is fired.
 - If the beam reaches its power limit with no collision, the notification reads **“Beam range exhausted.”** If the curve leaves the sector before that limit, it reads **“Beam exits the sector.”**
@@ -69,7 +71,7 @@ npm run start  # Serve a production build
 
 ### Match outcome
 
-- The first side with no surviving ships loses immediately. The authoritative game state records the winner and `fleet-destroyed` end reason and presents the same win/loss result to both live peers. Bot matches offer a fresh training sector; live matches return both pilots to the lobby.
+- The first side with no surviving ships loses immediately. The authoritative game state records the winner and `fleet-destroyed` end reason and presents the same win/loss result to both live peers. Bot matches offer a fresh training sector; live matches return both commanders to the lobby.
 
 ### Board generation
 
@@ -80,7 +82,7 @@ Every match generates a new board: each fleet spawns at random, separated positi
 - The guest/client view is **mirrored horizontally** so your fleet always appears on the left. Clicks are transformed back to world coordinates before being sent to the host.
 - Waypoint lines and planned movement remain **owner-only**. Opponents can see a ship’s live position, heading, and movement, but not its chosen destination or planned route.
 
-The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, parentheses, `+`, `-`, `*`, `/`, `^`, and `sin`, `cos`, `tan`, `abs`, `sqrt`, `log`, and `exp`; it never evaluates submitted JavaScript.
+The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, parentheses, `+`, `-`, `*`, `/`, `^`, and `sin`, `cos`, `tan`, `abs`, `sqrt`, `log`, `ln`, and `exp`; `ln` is an alias for the natural logarithm. It never evaluates submitted JavaScript.
 
 ## Architecture
 
@@ -121,7 +123,7 @@ The arena viewport has a fixed 5:3 aspect ratio. On ultrawide layouts it remains
 
 ### Live transport
 
-- [`app/api/join/route.js`](app/api/join/route.js) atomically pairs lobby tickets in Redis.
+- [`app/api/join/route.js`](app/api/join/route.js) atomically pairs public-queue tickets and private-lobby codes in Redis. Private codes are six uppercase, unambiguous characters and expire after 10 minutes; public queue tickets expire after 90 seconds.
 - [`app/api/signal/route.js`](app/api/signal/route.js) relays short-lived WebRTC offer, answer, ICE candidate, and leave messages.
 - [`app/api/ice/route.js`](app/api/ice/route.js) returns the client ICE configuration for a matched ticket.
 
@@ -140,8 +142,8 @@ The bot plays as **guest** and uses the same energy, movement, and fire rules as
 
 ## Current boundaries
 
-- One anonymous live queue; waiting tickets expire after 90 seconds.
+- One anonymous public live queue (90-second expiry), plus private lobbies with six-character codes (10-minute expiry).
 - No accounts, persistence, matchmaking rating, reconnect flow, or spectating.
 - TURN is not configured.
 - The bot is intentionally simple: it does not plan far ahead or coordinate multiple ships.
-- World distances use an internal **world-unit** coordinate system (1000×600); beam range and movement speeds are expressed in those units, not in expression-local `x`/`y`.
+- The renderer uses a 1000×600 internal world, but a fixed conversion keeps all player-facing graph distances coherent: **50 world units = one graph unit = one background grid square**.

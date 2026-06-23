@@ -2,6 +2,8 @@
 // that event without changing game flow or multiplayer state.
 export const ARENA_NOTIFICATIONS = Object.freeze({
   trainingInitialized: { enabled: true, message: 'New training sector initialized.', accent: '#55d5cc' },
+  combatStaging: { enabled: true, message: 'Systems are locked until the launch signal.', accent: '#8cb4cc' },
+  combatStarted: { enabled: true, message: 'Launch signal received. Energy systems online.', accent: '#55d5cc' },
   playerArcInFlight: { enabled: true, message: 'Arc in flight.', accent: '#55d5cc' },
   botArcInFlight: { enabled: true, message: 'Bot arc in flight.', accent: '#f27b82' },
   unstableFunction: { enabled: true, message: 'Unstable function — beam rejected.', accent: '#e46f78' },
