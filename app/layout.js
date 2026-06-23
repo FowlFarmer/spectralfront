@@ -3,7 +3,7 @@ import '../src/modes.css';
 
 export const metadata = {
   title: 'Spectral Front',
-  description: 'A casual peer-to-peer tactical duel.',
+  description: 'A casual tactical graph artillery duel.',
 };
 
 export default function RootLayout({ children }) {
