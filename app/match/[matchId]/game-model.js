@@ -31,6 +31,7 @@ function createPlanets(random, ships) {
       const r = radii[index];
       const appearance = choosePlanetAppearance(random, r);
       const candidate = { x: Math.round(between(random, 175, 825)), y: Math.round(between(random, r + 28, WORLD.height - r - 28)), r, volume: r ** 3, seed: Math.floor(random() * 0xffffffff), ...appearance };
+      candidate.moonBodies = createMoonBodies(candidate);
       const clearOfShips = allShips.every(ship => Math.hypot(candidate.x - ship.x, candidate.y - ship.y) > candidate.r + SHIP_CLEARANCE);
       const clearOfPlanets = planets.every(planet => Math.hypot(candidate.x - planet.x, candidate.y - planet.y) > candidate.r + planet.r + PLANET_CLEARANCE);
       if (clearOfShips && clearOfPlanets) { planets.push(candidate); break; }
@@ -59,6 +60,14 @@ function choosePlanetAppearance(random, radius) {
   const rings = type === 'saturnian' || (type === 'gasGiant' && random() < 0.16);
   const moons = radius >= 55 && random() < 0.72 ? 1 + Math.floor(random() * (radius >= 68 ? 3 : 2)) : 0;
   return { type, rings, moons };
+}
+
+function createMoonBodies(planet) {
+  const random = seededRandom(planet.seed ^ 0x9e3779b9);
+  return Array.from({ length: planet.moons || 0 }, (_, index) => {
+    const angle = random() * Math.PI * 2, distance = planet.r * (1.5 + index * 0.3 + random() * 0.32), r = Math.max(2, planet.r * (0.075 + random() * 0.04));
+    return { id: `${planet.seed}-${index}`, x: planet.x + Math.cos(angle) * distance, y: planet.y + Math.sin(angle) * distance, r, seed: Math.floor(random() * 0xffffffff) };
+  });
 }
 
 function weightedPick(random, entries) { const total = entries.reduce((sum, [, weight]) => sum + weight, 0); let cursor = random() * total; for (const [value, weight] of entries) { cursor -= weight; if (cursor <= 0) return value; } return entries.at(-1)[0]; }
@@ -109,6 +118,8 @@ export function applyGameAction(game, action) {
     if (asteroid) { impact = { kind: 'asteroid', x: point.x, y: point.y, seed: asteroid.seed, asteroidId: asteroid.id }; break; }
     const planet = next.planets.find(candidate => Math.hypot(point.x - candidate.x, point.y - candidate.y) < candidate.r);
     if (planet) { impact = { kind: 'planet', x: point.x, y: point.y, seed: planet.seed }; break; }
+    const moon = next.planets.flatMap(planet => planet.moonBodies || []).find(candidate => Math.hypot(point.x - candidate.x, point.y - candidate.y) < candidate.r);
+    if (moon) { impact = { kind: 'moon', x: point.x, y: point.y, seed: moon.seed, moonId: moon.id }; break; }
     const targetIndex = next.ships[ROLES[role]].findIndex(ship => ship.hp && Math.hypot(point.x - ship.x, point.y - ship.y) < SHIP_RADIUS);
     if (targetIndex >= 0) { impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1, shipRole: ROLES[role], shipIndex: targetIndex }; break; }
   }
@@ -174,7 +185,7 @@ function solveRoute(game, shooter, target) {
 }
 
 function pathReachesTarget(game, path, target) { for (const point of path) { if (hitsPlanet(game, point)) return false; if (Math.hypot(point.x - target.x, point.y - target.y) < SHIP_RADIUS) return true; } return false; }
-function hitsPlanet(game, point) { return game.planets.some(planet => Math.hypot(point.x - planet.x, point.y - planet.y) < planet.r); }
+function hitsPlanet(game, point) { return game.planets.some(planet => Math.hypot(point.x - planet.x, point.y - planet.y) < planet.r || (planet.moonBodies || []).some(moon => Math.hypot(point.x - moon.x, point.y - moon.y) < moon.r)); }
 function shuffle(values) { const next = [...values]; for (let index = next.length - 1; index > 0; index -= 1) { const swap = Math.floor(Math.random() * (index + 1)); [next[index], next[swap]] = [next[swap], next[index]]; } return next; }
 
 export function trace(source, ship, role) {

@@ -119,12 +119,12 @@ function drawPlanet(ctx, planet) {
     for (let index = 0; index < 30; index += 1) { const angle = random() * Math.PI * 2, distance = Math.sqrt(random()) * planet.r * 0.9, radius = 2 + random() * planet.r * 0.15; ctx.globalAlpha = 0.16 + random() * 0.32; ctx.fillStyle = index % 3 ? palette.detail : palette.land; ctx.beginPath(); ctx.arc(planet.x + Math.cos(angle) * distance, planet.y + Math.sin(angle) * distance, radius, 0, Math.PI * 2); ctx.fill(); }
     if (palette.cloud) for (let index = 0; index < 8; index += 1) { ctx.globalAlpha = 0.18; ctx.fillStyle = palette.cloud; ctx.beginPath(); ctx.ellipse(planet.x + (random() - 0.5) * planet.r * 1.5, planet.y + (random() - 0.5) * planet.r * 1.3, planet.r * (0.12 + random() * 0.18), planet.r * 0.045, random() * Math.PI, 0, Math.PI * 2); ctx.fill(); }
   }
-  ctx.restore(); ctx.globalAlpha = 1; ctx.strokeStyle = `${palette.core}cc`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(planet.x, planet.y, planet.r, 0, Math.PI * 2); ctx.stroke(); drawMoons(ctx, planet, random);
+  ctx.restore(); ctx.globalAlpha = 1; ctx.strokeStyle = `${palette.core}cc`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(planet.x, planet.y, planet.r, 0, Math.PI * 2); ctx.stroke(); drawMoons(ctx, planet);
 }
 
 function drawRings(ctx, planet, palette) { ctx.save(); ctx.translate(planet.x, planet.y); ctx.rotate(-0.22); ctx.strokeStyle = `${palette.cloud || palette.land}99`; ctx.lineWidth = Math.max(2, planet.r * 0.09); ctx.beginPath(); ctx.ellipse(0, 0, planet.r * 1.66, planet.r * 0.44, 0, 0, Math.PI * 2); ctx.stroke(); ctx.strokeStyle = `${palette.detail}bb`; ctx.lineWidth = Math.max(1, planet.r * 0.035); ctx.beginPath(); ctx.ellipse(0, 0, planet.r * 1.35, planet.r * 0.34, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
 
-function drawMoons(ctx, planet, random) { for (let index = 0; index < (planet.moons || 0); index += 1) { const angle = random() * Math.PI * 2, distance = planet.r * (1.5 + index * 0.3 + random() * 0.32), radius = Math.max(2, planet.r * (0.075 + random() * 0.04)), x = planet.x + Math.cos(angle) * distance, y = planet.y + Math.sin(angle) * distance; ctx.fillStyle = '#aebec4'; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#52636c'; ctx.lineWidth = 0.65; ctx.stroke(); } }
+function drawMoons(ctx, planet) { for (const moon of planet.moonBodies || []) { ctx.fillStyle = '#aebec4'; ctx.beginPath(); ctx.arc(moon.x, moon.y, moon.r, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#52636c'; ctx.lineWidth = 0.65; ctx.stroke(); } }
 
 function drawAsteroid(ctx, asteroid) {
   const random = seededRandom(asteroid.seed || 1), points = 7 + Math.floor(random() * 4);
