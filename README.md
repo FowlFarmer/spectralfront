@@ -1,10 +1,10 @@
 # Spectral Front
 
-Minimal Vercel-deployable, casual two-player artillery game. The lobby atomically pairs two browser sessions; Upstash Redis carries only matchmaking and short-lived WebRTC signals. The match itself runs over a WebRTC data channel, with the host browser resolving the game state.
+Minimal Next.js App Router, Vercel-deployable, casual two-player artillery game. The lobby atomically pairs two browser sessions; Upstash Redis carries only matchmaking and short-lived WebRTC signals. The match itself runs over a WebRTC data channel, with the host browser resolving the game state.
 
 ## Deploy
 
-1. Import the repository into Vercel.
+1. Import the repository into Vercel. It detects Next.js automatically.
 2. Add the **Upstash Redis** integration in Vercel, create a Redis database, and connect it to this project. It supplies `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
 3. Deploy. TURN is intentionally optional for this MVP.
 

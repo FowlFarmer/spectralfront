@@ -1,0 +1,10 @@
+import { NextResponse } from 'next/server';
+import { command, readTicket } from '../../../lib/kv';
+export const runtime = 'nodejs'; export const dynamic = 'force-dynamic';
+const valid = value => typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value);
+const joinScript = `local q=redis.call('GET',KEYS[1]) if q and q~=ARGV[1] then redis.call('DEL',KEYS[1]) redis.call('SET',KEYS[2],ARGV[2],'EX',3600) redis.call('SET','sf:ticket:'..q,ARGV[3],'EX',3600) redis.call('SET','sf:ticket:'..ARGV[1],ARGV[4],'EX',3600) return {'matched'} end redis.call('SET',KEYS[1],ARGV[1],'EX',90) redis.call('SET','sf:ticket:'..ARGV[1],ARGV[5],'EX',95) return {'waiting'}`;
+const cancelScript = `if redis.call('GET',KEYS[1])==ARGV[1] then redis.call('DEL',KEYS[1]) end redis.call('DEL',KEYS[2]) return 1`;
+const json = (body, status = 200) => NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+export async function GET(request) { try { const value = await readTicket(new URL(request.url).searchParams.get('ticket')); return json(value ? JSON.parse(value) : { status: 'expired' }); } catch (error) { return json({ error: error.message }, 503); } }
+export async function POST(request) { try { const { ticket } = await request.json(); if (!valid(ticket)) return json({ error: 'Invalid match ticket.' }, 400); const matchId = crypto.randomUUID(); const result = await command('EVAL', joinScript, 2, 'sf:queue', `sf:match:${matchId}`, ticket, JSON.stringify({ id: matchId, createdAt: Date.now() }), JSON.stringify({ status: 'matched', matchId, role: 'host' }), JSON.stringify({ status: 'matched', matchId, role: 'guest' }), JSON.stringify({ status: 'waiting' })); return json({ status: result[0] }); } catch (error) { return json({ error: error.message }, 503); } }
+export async function DELETE(request) { try { const { ticket } = await request.json(); if (!valid(ticket)) return json({ error: 'Invalid match ticket.' }, 400); await command('EVAL', cancelScript, 2, 'sf:queue', `sf:ticket:${ticket}`, ticket); return json({ ok: true }); } catch (error) { return json({ error: error.message }, 503); } }

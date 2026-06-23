@@ -1,0 +1,8 @@
+import { NextResponse } from 'next/server';
+import { command, readTicket } from '../../../lib/kv';
+export const runtime = 'nodejs'; export const dynamic = 'force-dynamic';
+const drain = `local v=redis.call('LRANGE',KEYS[1],0,-1) redis.call('DEL',KEYS[1]) return v`;
+const json = (body, status = 200) => NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+async function player(ticket) { const value = await readTicket(ticket); if (!value) throw new Error('Match expired.'); const parsed = JSON.parse(value); if (parsed.status !== 'matched') throw new Error('Match is not ready.'); return parsed; }
+export async function GET(request) { try { const p = await player(new URL(request.url).searchParams.get('ticket')); const values = await command('EVAL', drain, 1, `sf:signal:${p.matchId}:${p.role}`); return json({ messages: values.map(JSON.parse) }); } catch (error) { return json({ error: error.message }, 401); } }
+export async function POST(request) { try { const { ticket, message } = await request.json(); const p = await player(ticket); if (!message || !['offer','answer','candidate','peer-left'].includes(message.type) || JSON.stringify(message).length > 20000) return json({ error: 'Invalid signal.' }, 400); const target = p.role === 'host' ? 'guest' : 'host'; const key = `sf:signal:${p.matchId}:${target}`; await command('RPUSH', key, JSON.stringify(message)); await command('EXPIRE', key, 3600); return json({ ok: true }); } catch (error) { return json({ error: error.message }, 401); } }
