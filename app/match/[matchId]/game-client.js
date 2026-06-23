@@ -3,90 +3,158 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import ArenaCanvas from './arena-canvas';
-import { applyGameAction, createBotAction, createMatch, isMatchOver, liveShips, resolvePendingShot, SHOT_FLIGHT_MS } from './game-model';
+import {
+  advanceSimulation,
+  applyGameAction,
+  beamDistanceForPower,
+  createBotAction,
+  createMatch,
+  ENERGY_MAX,
+  fireEnergyCost,
+  isMatchOver,
+  liveShips,
+  MOVE_INITIAL_COST,
+  SIM_TICK_MS,
+} from './game-model';
 import { notificationFor } from './notification-config';
 
 const sessionKey = 'spectral-front-session';
-const shotLockDuration = SHOT_FLIGHT_MS + 120;
 const request = async (path, options = {}) => { const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options }); const body = await response.json().catch(() => ({})); if (!response.ok) throw Error(body.error || 'Network error'); return body; };
-const notificationKeyForResult = result => result.unstable ? 'unstableFunction' : result.hit ? 'directHit' : result.impact?.kind === 'asteroid' ? 'asteroidDestroyed' : result.impact?.kind === 'moon' ? 'moonImpact' : result.impact?.kind === 'planet' ? 'planetImpact' : 'beamExited';
+const notificationKeyForResult = result => {
+  if (result.unstable) return 'unstableFunction';
+  if (result.hit) return 'directHit';
+  if (result.impact?.kind === 'asteroid') return 'asteroidDestroyed';
+  if (result.impact?.kind === 'moon') return 'moonImpact';
+  if (result.impact?.kind === 'planet') return 'planetImpact';
+  if (result.stopReason === 'range') return 'beamRangeExpired';
+  return 'beamExited';
+};
 
 export default function GameClient({ matchId }) {
   const router = useRouter(), isBotMatch = matchId.startsWith('bot-');
-  const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null), botTimer = useRef(null), botTurnKey = useRef(null), shotTimer = useRef(null), resolveTimer = useRef(null), noticeTimers = useRef(new Map()), shotAnimating = useRef(false);
-  const [game, setGame] = useState(null), [selected, setSelected] = useState(0), [link, setLink] = useState('LINKING'), [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x'), [notices, setNotices] = useState([]), [arcHistory, setArcHistory] = useState([]);
+  const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
+  const botTimer = useRef(null), botTickKey = useRef(null);
+  const noticeTimers = useRef(new Map()), simTimer = useRef(null);
+  const [game, setGame] = useState(null), [selected, setSelected] = useState(0), [link, setLink] = useState('LINKING');
+  const [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x');
+  const [power, setPower] = useState(75), [notices, setNotices] = useState([]), [arcHistory, setArcHistory] = useState([]);
+
   const publish = useCallback(next => { gameRef.current = next; setGame(next); }, []);
   const send = useCallback(message => { if (channel.current?.readyState === 'open') channel.current.send(JSON.stringify(message)); }, []);
-  const lockShot = useCallback(() => { clearTimeout(shotTimer.current); shotAnimating.current = true; shotTimer.current = window.setTimeout(() => { shotAnimating.current = false; }, shotLockDuration); }, []);
-  const stop = useCallback(() => { clearTimeout(botTimer.current); botTurnKey.current = null; clearTimeout(shotTimer.current); clearTimeout(resolveTimer.current); channel.current?.close(); peer.current?.close(); }, []);
+  const stop = useCallback(() => {
+    clearTimeout(botTimer.current); botTickKey.current = null;
+    clearInterval(simTimer.current); channel.current?.close(); peer.current?.close();
+  }, []);
   const leave = useCallback(async () => { if (!isBotMatch) try { await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: session.current?.ticket, message: { type: 'peer-left' } }) }); } catch {} stop(); sessionStorage.removeItem(sessionKey); router.push('/'); }, [isBotMatch, router, stop]);
   const pushNotice = useCallback(key => {
-    const message = notificationFor(key);
-    if (!message) return;
+    const notification = notificationFor(key);
+    if (!notification) return;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setNotices(queue => [...queue, { id, message }].slice(-4));
+    setNotices(queue => [...queue, { id, ...notification }].slice(-4));
     noticeTimers.current.set(id, window.setTimeout(() => { setNotices(queue => queue.filter(notice => notice.id !== id)); noticeTimers.current.delete(id); }, 3800));
   }, []);
   const clearNotices = useCallback(() => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); noticeTimers.current.clear(); setNotices([]); }, []);
-  const restartBotMatch = useCallback(() => { clearTimeout(botTimer.current); botTurnKey.current = null; clearTimeout(shotTimer.current); clearTimeout(resolveTimer.current); shotAnimating.current = false; clearNotices(); setSelected(0); pushNotice('trainingInitialized'); publish(createMatch()); }, [clearNotices, publish, pushNotice]);
+  const restartBotMatch = useCallback(() => {
+    clearTimeout(botTimer.current); botTickKey.current = null;
+    clearNotices(); setSelected(0); setPower(75); pushNotice('trainingInitialized'); publish(createMatch(undefined, { botMatch: true }));
+  }, [clearNotices, publish, pushNotice]);
   const rememberArc = useCallback(expression => { const arc = expression.trim(); if (arc) setArcHistory(history => [arc, ...history.filter(entry => entry !== arc)].slice(0, 6)); }, []);
 
   const commitAction = useCallback(action => {
     const result = applyGameAction(gameRef.current, action);
-    if (result.ignored) return null;
-    if (action.role === session.current?.role) rememberArc(action.expression);
-    lockShot(); publish(result.game); pushNotice(result.pending ? 'playerArcInFlight' : notificationKeyForResult(result));
+    const me = session.current?.role;
+    if (result.ignored) {
+      if (action.role !== me) return null;
+      if (result.blocked) pushNotice('pathBlocked');
+      else if (result.reason === 'lowEnergyFire') pushNotice('notEnoughEnergyFire');
+      else if (result.reason === 'lowEnergyMove') pushNotice('notEnoughEnergyMove');
+      return null;
+    }
+    if (action.type === 'fire' && action.role === session.current?.role) rememberArc(action.expression);
+    if (action.type === 'move') pushNotice('moveOrdered');
+    if (action.type === 'cancelMove') pushNotice('moveCancelled');
+    if (action.type === 'fire') pushNotice(notificationKeyForResult(result));
+    publish(result.game);
     if (!isBotMatch) send({ type: 'state', state: result.game });
     return result;
-  }, [isBotMatch, lockShot, publish, pushNotice, rememberArc, send]);
+  }, [isBotMatch, publish, pushNotice, rememberArc, send]);
 
-  const completePendingShot = useCallback(shotId => {
-    const result = resolvePendingShot(gameRef.current, shotId);
-    if (result.ignored) return;
-    shotAnimating.current = false;
-    publish(result.game); pushNotice(notificationKeyForResult(result));
-    if (!isBotMatch) send({ type: 'state', state: result.game });
-  }, [isBotMatch, publish, pushNotice, send]);
-
-  const takeBotTurn = useCallback(turnKey => {
-    if (botTurnKey.current !== turnKey) return;
-    botTurnKey.current = null;
-    const action = createBotAction(gameRef.current); if (!action) return;
-    const result = commitAction(action); if (!result) return;
-    pushNotice('botArcInFlight');
-  }, [commitAction, pushNotice]);
+  const notifyEvents = useCallback(events => {
+    const me = session.current?.role;
+    for (const event of events || []) {
+      if (event.role === me) pushNotice(event.key);
+    }
+  }, [pushNotice]);
 
   const submitAction = useCallback(action => {
-    if (shotAnimating.current || gameRef.current?.pendingShot) return;
-    if (isBotMatch || session.current?.role === 'host') {
+    const me = session.current?.role;
+    if (action.type === 'fire' && gameRef.current?.energy[me] < fireEnergyCost(action.power ?? 100)) {
+      pushNotice('notEnoughEnergyFire');
+      return;
+    }
+    if (action.type === 'move' && gameRef.current?.energy[me] < MOVE_INITIAL_COST) {
+      pushNotice('notEnoughEnergyMove');
+      return;
+    }
+    if (isBotMatch || me === 'host') {
       commitAction(action);
       return;
     }
-    rememberArc(action.expression);
-    lockShot();
+    if (action.type === 'fire') rememberArc(action.expression);
     send({ type: 'action', action });
-  }, [commitAction, isBotMatch, lockShot, rememberArc, send]);
+  }, [commitAction, isBotMatch, pushNotice, rememberArc, send]);
+
+  const handleMove = useCallback(point => {
+    const me = session.current?.role;
+    if (!me || isMatchOver(gameRef.current)) return;
+    const ship = gameRef.current?.ships[me]?.[selected];
+    if (!ship?.hp) return;
+    submitAction({ type: 'move', role: me, shipIndex: selected, x: point.x, y: point.y });
+  }, [selected, submitAction]);
+
+  const handleCancelMove = useCallback(() => {
+    const me = session.current?.role;
+    if (!me || isMatchOver(gameRef.current)) return;
+    const ship = gameRef.current?.ships[me]?.[selected];
+    if (ship?.hp && ship.moving && !ship.braking) submitAction({ type: 'cancelMove', role: me, shipIndex: selected });
+  }, [selected, submitAction]);
+
+  const takeBotTurn = useCallback(tickKey => {
+    if (botTickKey.current !== tickKey) return;
+    const action = createBotAction(gameRef.current);
+    if (!action) return;
+    commitAction(action);
+  }, [commitAction]);
+
+  const botDecisionWindow = Math.floor((game?.simTime || 0) / 500);
 
   useEffect(() => {
-    if (!game?.pendingShot || (!isBotMatch && session.current?.role !== 'host')) return;
-    const shotId = game.pendingShot.id;
-    clearTimeout(resolveTimer.current);
-    resolveTimer.current = window.setTimeout(() => completePendingShot(shotId), SHOT_FLIGHT_MS);
-    return () => clearTimeout(resolveTimer.current);
-  }, [completePendingShot, game?.pendingShot?.id, isBotMatch]);
+    clearInterval(simTimer.current);
+    const isAuthority = isBotMatch || session.current?.role === 'host';
+    if (!game || isMatchOver(game) || !isAuthority) return;
+    simTimer.current = window.setInterval(() => {
+      const { game: next, events } = advanceSimulation(gameRef.current, SIM_TICK_MS);
+      if (next.simTime !== gameRef.current?.simTime) {
+        publish(next);
+        notifyEvents(events);
+        if (!isBotMatch) send({ type: 'state', state: next, events });
+      }
+    }, SIM_TICK_MS);
+    return () => clearInterval(simTimer.current);
+  }, [game?.outcome, game?.seed, isBotMatch, notifyEvents, publish, send]);
 
   useEffect(() => {
     clearTimeout(botTimer.current);
-    const turnKey = game ? `${game.seed}:${game.round}:${game.shotNumber}:${game.turn}` : null;
-    if (!isBotMatch || game?.pendingShot || game?.turn !== 'guest' || isMatchOver(game)) { botTurnKey.current = null; return; }
-    if (botTurnKey.current === turnKey) return;
-    botTurnKey.current = turnKey;
-    botTimer.current = window.setTimeout(() => takeBotTurn(turnKey), 700);
-    return () => { clearTimeout(botTimer.current); if (botTurnKey.current === turnKey) botTurnKey.current = null; };
-  }, [game?.outcome, game?.pendingShot?.id, game?.round, game?.seed, game?.shotNumber, game?.turn, isBotMatch, takeBotTurn]);
+    const tickKey = game ? `${game.seed}:${botDecisionWindow}` : null;
+    if (!isBotMatch || isMatchOver(game)) { botTickKey.current = null; return; }
+    if (botTickKey.current === tickKey) return;
+    botTickKey.current = tickKey;
+    botTimer.current = window.setTimeout(() => takeBotTurn(tickKey), 150 + Math.random() * 180);
+    return () => { clearTimeout(botTimer.current); if (botTickKey.current === tickKey) botTickKey.current = null; };
+  }, [botDecisionWindow, game?.outcome, game?.seed, isBotMatch, takeBotTurn]);
 
   const connect = useCallback(async () => {
-    if (isBotMatch) { session.current = { role: 'host' }; setLink('BOT UPLINK'); publish(createMatch()); return; }
+    if (isBotMatch) { session.current = { role: 'host' }; setLink('BOT UPLINK'); publish(createMatch(undefined, { botMatch: true })); return; }
     const stored = JSON.parse(sessionStorage.getItem(sessionKey) || 'null'); if (!stored || stored.matchId !== matchId) { router.replace('/'); return; }
     session.current = stored;
     try {
@@ -98,7 +166,14 @@ export default function GameClient({ matchId }) {
         channel.current = dataChannel;
         dataChannel.onopen = () => { setLink('DIRECT LINK'); if (stored.role === 'host') { const initial = createMatch(); send({ type: 'state', state: initial }); publish(initial); } };
         dataChannel.onclose = () => { if (!isMatchOver(gameRef.current)) setProblem('The other pilot left the duel.'); };
-        dataChannel.onmessage = event => { const message = JSON.parse(event.data); if (message.type === 'state') publish(message.state); if (message.type === 'action' && stored.role === 'host') commitAction({ ...message.action, role: 'guest' }); };
+        dataChannel.onmessage = event => {
+          const message = JSON.parse(event.data);
+          if (message.type === 'state') {
+            publish(message.state);
+            notifyEvents(message.events);
+          }
+          if (message.type === 'action' && stored.role === 'host') commitAction({ ...message.action, role: 'guest' });
+        };
       };
       pc.ondatachannel = event => open(event.channel);
       if (stored.role === 'host') { open(pc.createDataChannel('match', { ordered: true })); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'offer', sdp: offer } }) }); }
@@ -106,38 +181,59 @@ export default function GameClient({ matchId }) {
       (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { await pc.setRemoteDescription(message.sdp); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); } if (message.type === 'answer' && stored.role === 'host') await pc.setRemoteDescription(message.sdp); if (message.type === 'candidate') await pc.addIceCandidate(message.candidate).catch(() => {}); if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) setProblem('The other pilot left the duel.'); } } catch {} await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
       return () => { cancelled = true; };
     } catch (error) { setProblem(error.message); }
-  }, [commitAction, isBotMatch, matchId, publish, router, send]);
+  }, [commitAction, isBotMatch, matchId, notifyEvents, publish, router, send]);
 
   useEffect(() => { let cleanup; connect().then(fn => cleanup = fn); return () => { cleanup?.(); stop(); }; }, [connect, stop]);
   useEffect(() => () => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); }, []);
+
   if (!game || problem) return <div className="game-shell"><header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div></header><section className="disconnected standalone"><div>{!problem && <div className="spinner" />}<h2>{problem ? 'Match unavailable' : 'Setting up the duel'}</h2><p>{problem || 'Securing a direct browser connection…'}</p><button className="primary" onClick={leave}>BACK TO LOBBY</button></div></section></div>;
+
   const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], matchOver = isMatchOver(game), won = game.outcome === me;
-  const fireCurrent = () => { if (!matchOver && !game.pendingShot && game.turn === me && myShips[selected]?.hp) submitAction({ type: 'fire', role: me, shipIndex: selected, expression: formula }); };
+  const myEnergy = game.energy[me], fireCost = fireEnergyCost(power), beamRange = Math.round(beamDistanceForPower(power));
+  const canFire = !matchOver && myShips[selected]?.hp && myEnergy >= fireCost;
+  const fireCurrent = () => {
+    if (matchOver || !myShips[selected]?.hp) return;
+    if (myEnergy < fireCost) { pushNotice('notEnoughEnergyFire'); return; }
+    submitAction({ type: 'fire', role: me, shipIndex: selected, expression: formula, power });
+  };
+
   return (
     <div className="game-shell">
       <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><button className="leave" onClick={leave}>LEAVE MATCH</button></header>
       <main className="game-grid">
         <aside className="panel side">
-          <div><div className="label">TURN</div><div className="turn">{matchOver ? (won ? 'Sector secured' : 'Fleet lost') : game.pendingShot ? 'Arc in flight' : game.turn === me ? 'Your turn — plot a line' : isBotMatch ? 'Bot is plotting' : 'Rival is plotting'}</div></div>
           <div>
-            <div className={'player ' + (game.turn === me && !game.pendingShot ? 'active' : '')}><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : game.pendingShot ? 'HOLDING FIRE' : 'SELECT A SHIP'}</small><div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || matchOver || !!game.pendingShot} className={'ship-choice ' + (index === selected ? 'selected' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? 'READY' : 'LOST'}</i></button>)}</div></div>
-            <div className={'player enemy ' + (game.turn === foe && !game.pendingShot ? 'active' : '')}><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : game.pendingShot ? 'IMPACT PREDICTED' : isBotMatch ? 'NAVIGATION AI' : 'OPPOSING FLEET'}</small><div className="dots">{'● '.repeat(liveShips(game, foe).length) || '—'}</div></div>
+            <div className="label">ENERGY</div>
+            <div className="energy-bar" aria-label={`Energy ${Math.round(myEnergy)} of ${ENERGY_MAX}`}>
+              <div className="energy-fill" style={{ width: `${(myEnergy / ENERGY_MAX) * 100}%` }} />
+              <span>{Math.round(myEnergy)} / {ENERGY_MAX}</span>
+            </div>
           </div>
-          <div className="rules">Pick a ship. It is <b>(0,0)</b> for this shot. The field remains Cartesian: left is −x, right is +x, up is +y.</div>
+          <div>
+            <div className="player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · CLICK SPACE TO MOVE'}</small>
+              <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || matchOver} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button>)}</div>
+            </div>
+            <div className="player enemy"><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'NAVIGATION AI' : 'OPPOSING FLEET'}</small><div className="dots">{'● '.repeat(liveShips(game, foe).length) || '—'}</div></div>
+          </div>
+          <div className="rules">Live combat — energy regenerates slowly. Click space to move a selected ship; click again to stop. Your fleet always appears on the left.</div>
         </aside>
         <section className="panel arena-wrap">
-          <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : game.pendingShot ? 'ARC IN FLIGHT' : `ROUND ${String(game.round).padStart(2, '0')}`}</span></div>
-          <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} />
-          <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id}>{notice.message}</div>)}</div>
+          <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : `LIVE · ${Math.round((game.simTime || 0) / 1000)}s`}</span></div>
+          <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={handleMove} onCancelMove={handleCancelMove} matchOver={matchOver} expression={formula} power={power} previewDisabled={matchOver} />
+          <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
           {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} onRestart={restartBotMatch} onLeave={leave} />}
           <section className="command">
             <div className="formula">
               <label>FIRING ARC — Y = F(X)</label>
-              <div className="formula-row"><span>y =</span><input value={formula} disabled={matchOver || !!game.pendingShot} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
-              <div className="hint">{matchOver ? 'Command channel closed — match result confirmed.' : game.pendingShot ? 'Trajectory locked until the beam resolves.' : 'Origin: selected ship (0, 0) · sin, cos, abs, sqrt, log, exp'}</div>
-              {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={matchOver || !!game.pendingShot} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
+              <div className="formula-row"><span>y =</span><input value={formula} disabled={matchOver} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
+              <div className="power-control">
+                <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange}u range · {Math.round(fireCost)} energy</label>
+                <input id="beam-power" type="range" min="5" max="100" value={power} disabled={matchOver} onChange={event => setPower(+event.target.value)} />
+              </div>
+              <div className="hint">{matchOver ? 'Command channel closed.' : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship (0, 0) · sin, cos, abs, sqrt, log, exp'}</div>
+              {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={matchOver} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
             </div>
-            <button className="fire" disabled={game.turn !== me || matchOver || !!game.pendingShot} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : game.pendingShot ? 'ARC IN FLIGHT' : 'FIRE ARC'}</button>
+            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM'}</button>
           </section>
         </section>
       </main>

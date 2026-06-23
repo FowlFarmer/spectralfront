@@ -1,14 +1,16 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD } from './game-model';
+import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD, beamDistanceForPower, mirrorWorldX, trace } from './game-model';
 
-export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
+export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', power = 100, previewDisabled = false }) {
   const viewport = useRef(null), canvas = useRef(null);
-  // Shared game events only carry a stable shot id. Each client owns its
-  // animation clock, which avoids assuming its system clock matches the host.
   const eventStarts = useRef(new Map());
-  const [now, setNow] = useState(() => performance.now()), [cursor, setCursor] = useState(null);
+  const displayAngles = useRef(new Map());
+  const lastFrameTime = useRef(performance.now());
+  const [now, setNow] = useState(() => performance.now()), [cursor, setCursor] = useState(null), [waypointHovered, setWaypointHovered] = useState(false);
+  const mirrored = role === 'guest';
+
   const eventAge = event => {
     let start = eventStarts.current.get(event.id);
     if (start === undefined) {
@@ -17,6 +19,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
     }
     return Math.max(0, now - start);
   };
+
   const draw = useCallback(() => {
     const element = canvas.current, box = viewport.current;
     if (!element || !box || !game) return;
@@ -26,56 +29,349 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip }) {
     if (element.height !== height) element.height = height;
     const ctx = element.getContext('2d');
     ctx.setTransform(width / WORLD.width, 0, 0, height / WORLD.height, 0, 0);
+    if (mirrored) { ctx.scale(-1, 1); ctx.translate(-WORLD.width, 0); }
     drawSpace(ctx, game.seed);
     ctx.strokeStyle = '#172b3b'; ctx.lineWidth = 1;
     for (let x = 0; x < WORLD.width; x += WORLD.grid) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, WORLD.height); ctx.stroke(); }
     for (let y = 0; y < WORLD.height; y += WORLD.grid) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(WORLD.width, y); ctx.stroke(); }
     const origin = game.ships[role]?.[selected];
-    if (origin?.hp) { ctx.setLineDash([5, 6]); ctx.strokeStyle = '#5fe2d455'; ctx.beginPath(); ctx.moveTo(0, origin.y); ctx.lineTo(WORLD.width, origin.y); ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, WORLD.height); ctx.stroke(); ctx.setLineDash([]); ctx.strokeStyle = '#5fe2d4'; ctx.beginPath(); ctx.arc(origin.x, origin.y, SHIP_RADIUS + 2, 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = '#a7dcd8'; ctx.font = '10px DM Mono'; ctx.fillText('(0, 0)', origin.x + 15, origin.y - 13); }
+    if (origin?.hp) {
+      ctx.setLineDash([5, 6]); ctx.strokeStyle = '#5fe2d455';
+      ctx.beginPath(); ctx.moveTo(0, origin.y); ctx.lineTo(WORLD.width, origin.y); ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, WORLD.height); ctx.stroke();
+      ctx.setLineDash([]); ctx.strokeStyle = '#5fe2d4'; ctx.beginPath(); ctx.arc(origin.x, origin.y, SHIP_RADIUS + 2, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#a7dcd8'; ctx.font = '10px DM Mono'; ctx.fillText('(0, 0)', origin.x + 15, origin.y - 13);
+      if (origin.waypoint && origin.moving) drawWaypoint(ctx, origin, origin.waypoint, waypointHovered);
+    }
     for (const planet of game.planets) drawPlanet(ctx, planet);
     for (const asteroid of game.asteroids || []) drawAsteroid(ctx, asteroid);
-    for (const trail of game.trails || []) { const age = eventAge(trail); if (age < TRAIL_DURATION) drawLaserTrail(ctx, trail, age); }
-    for (const bloom of game.blooms || []) { const age = eventAge(bloom); if (age >= FLIGHT_TIME && age < SHOT_DURATION) drawImpactBurst(ctx, bloom.impact, age - FLIGHT_TIME); }
-    for (const [shipRole, ships] of Object.entries(game.ships)) for (const ship of ships) { if (!ship.hp) continue; ctx.save(); ctx.translate(ship.x, ship.y); ctx.fillStyle = shipRole === 'host' ? '#5fe2d4' : '#f27b82'; ctx.beginPath(); ctx.moveTo(shipRole === 'host' ? SHIP_RADIUS : -SHIP_RADIUS, 0); ctx.lineTo(shipRole === 'host' ? -6 : 6, -4); ctx.lineTo(shipRole === 'host' ? -3 : 3, 0); ctx.lineTo(shipRole === 'host' ? -6 : 6, 4); ctx.closePath(); ctx.fill(); ctx.restore(); }
+    if (origin?.hp) drawTrajectoryPreview(ctx, expression, origin, role, power, previewDisabled);
+    for (const trail of game.trails || []) {
+      const age = eventAge(trail);
+      const flightTime = trail.flightDuration || FLIGHT_TIME;
+      if (age < flightTime + TRAIL_FADE_TIME) drawLaserTrail(ctx, trail, age, trail.role === role);
+    }
+    for (const bloom of game.blooms || []) {
+      const age = eventAge(bloom);
+      const trail = (game.trails || []).find(entry => entry.id === bloom.id);
+      const flightTime = trail?.flightDuration || FLIGHT_TIME;
+      if (age >= flightTime && age < flightTime + BLOOM_DURATION) drawImpactBurst(ctx, bloom.impact, age - flightTime);
+    }
+    const frameTime = performance.now();
+    const dtSec = Math.min(0.05, (frameTime - lastFrameTime.current) / 1000);
+    lastFrameTime.current = frameTime;
+    for (const [shipRole, ships] of Object.entries(game.ships)) {
+      for (let index = 0; index < ships.length; index += 1) {
+        const ship = ships[index];
+        if (!ship.hp) continue;
+        const displayAngle = updateDisplayAngle(displayAngles.current, `${shipRole}-${index}`, ship, mirrored, dtSec);
+        drawShip(ctx, ship, shipRole, displayAngle);
+      }
+    }
     if (cursor) drawCursorReadout(ctx, cursor, origin, bounds);
-  }, [cursor, game, now, role, selected]);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }, [cursor, expression, game, mirrored, now, power, previewDisabled, role, selected, waypointHovered]);
+
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => { const element = viewport.current; if (!element) return; const observer = new ResizeObserver(draw); observer.observe(element); return () => observer.disconnect(); }, [draw]);
+
   useEffect(() => {
     const events = [...(game.trails || []), ...(game.blooms || [])], activeIds = new Set(events.map(event => event.id)), startedAt = performance.now();
     for (const event of events) if (!eventStarts.current.has(event.id)) eventStarts.current.set(event.id, startedAt);
     for (const id of eventStarts.current.keys()) if (!activeIds.has(id)) eventStarts.current.delete(id);
-    const hasActiveEvent = time => (game.trails || []).some(trail => time - eventStarts.current.get(trail.id) < TRAIL_DURATION) || (game.blooms || []).some(bloom => time - eventStarts.current.get(bloom.id) < SHOT_DURATION);
-    if (!hasActiveEvent(startedAt)) return;
+    const hasActiveEvent = time => (game.trails || []).some(trail => {
+      const flightTime = trail.flightDuration || FLIGHT_TIME;
+      return time - eventStarts.current.get(trail.id) < flightTime + TRAIL_FADE_TIME;
+    }) || (game.blooms || []).some(bloom => {
+      const trail = (game.trails || []).find(entry => entry.id === bloom.id);
+      const flightTime = trail?.flightDuration || FLIGHT_TIME;
+      const start = eventStarts.current.get(bloom.id);
+      return start !== undefined && time - start < flightTime + BLOOM_DURATION;
+    });
+    const needsAnimation = time => hasActiveEvent(time) || shipsNeedRotationTick(game, displayAngles.current, mirrored);
+    if (!needsAnimation(startedAt)) return;
     let frame;
     const tick = () => {
       const time = performance.now();
       setNow(time);
-      if (hasActiveEvent(time)) frame = requestAnimationFrame(tick);
+      if (needsAnimation(time)) frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [game.trails, game.blooms]);
-  const selectShipAt = event => { const point = pointerToWorld(event, canvas.current), index = game.ships[role].findIndex(ship => ship.hp && Math.hypot(ship.x - point.x, ship.y - point.y) <= SHIP_RADIUS + 7); if (index >= 0) onSelectShip(index); };
-  const trackCursor = event => setCursor(pointerToWorld(event, canvas.current));
-  return <div className="canvas-stage" ref={viewport}><canvas ref={canvas} aria-label="Match arena" onClick={selectShipAt} onPointerMove={trackCursor} onPointerLeave={() => setCursor(null)} /></div>;
+  }, [game, game?.trails, game?.blooms, game?.ships, mirrored]);
+
+  const handleClick = event => {
+    const point = pointerToWorld(event, canvas.current, mirrored);
+    if (isWaypointHit(point, game.ships[role]?.[selected])) { onCancelMove?.(); return; }
+    const index = game.ships[role].findIndex(ship => ship.hp && Math.hypot(ship.x - point.x, ship.y - point.y) <= SHIP_RADIUS + 7);
+    if (index >= 0) { onSelectShip(index); return; }
+    if (!matchOver && onMoveShip && game.ships[role][selected]?.hp) onMoveShip(point);
+  };
+
+  const trackPointer = event => {
+    const point = pointerToWorld(event, canvas.current, mirrored);
+    setCursor(point);
+    setWaypointHovered(isWaypointHit(point, game.ships[role]?.[selected]));
+  };
+
+  return <div className="canvas-stage" ref={viewport}><canvas ref={canvas} aria-label="Match arena" style={{ cursor: waypointHovered ? 'pointer' : 'crosshair' }} onClick={handleClick} onPointerMove={trackPointer} onPointerLeave={() => { setCursor(null); setWaypointHovered(false); }} /></div>;
 }
 
-const FLIGHT_TIME = SHOT_FLIGHT_MS, BLOOM_DURATION = 5200, SHOT_DURATION = FLIGHT_TIME + BLOOM_DURATION, TRAIL_FADE_TIME = 4200, TRAIL_DURATION = FLIGHT_TIME + TRAIL_FADE_TIME;
-function pointerToWorld(event, element) { const bounds = element.getBoundingClientRect(); return { x: Math.max(0, Math.min(WORLD.width, (event.clientX - bounds.left) / bounds.width * WORLD.width)), y: Math.max(0, Math.min(WORLD.height, (event.clientY - bounds.top) / bounds.height * WORLD.height)) }; }
+const FLIGHT_TIME = SHOT_FLIGHT_MS, BLOOM_DURATION = 5200, TRAIL_FADE_TIME = 4200;
+const SHIP_TURN_RATE = 3.4;
+const PREVIEW_PATH_FRACTION = 0.38;
+
+function truncatePathByFraction(path, fraction) {
+  const limit = pathLength(path) * fraction;
+  if (limit <= 0 || path.length < 2) return path;
+  let traveled = 0;
+  const result = [path[0]];
+  for (let index = 1; index < path.length; index += 1) {
+    const previous = path[index - 1], point = path[index];
+    const segment = Math.hypot(point.x - previous.x, point.y - previous.y);
+    if (traveled + segment >= limit) {
+      const ratio = (limit - traveled) / segment;
+      result.push({ x: previous.x + (point.x - previous.x) * ratio, y: previous.y + (point.y - previous.y) * ratio });
+      return result;
+    }
+    traveled += segment;
+    result.push(point);
+  }
+  return result;
+}
+
+function drawTrajectoryPreview(ctx, expression, ship, shipRole, power, disabled) {
+  if (disabled || !expression.trim()) return;
+  const path = trace(expression, ship, shipRole, beamDistanceForPower(power));
+  if (path.length < 2) return;
+  const preview = truncatePathByFraction(path, PREVIEW_PATH_FRACTION);
+  ctx.save();
+  ctx.setLineDash([5, 7]);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#55d5cc88';
+  ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  preview.forEach((point, index) => (index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)));
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#a7f5ef';
+  ctx.beginPath();
+  ctx.arc(preview.at(-1).x, preview.at(-1).y, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function shortestAngleDiff(from, to) {
+  let diff = to - from;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return diff;
+}
+
+function lerpAngle(current, target, maxDelta) {
+  const diff = shortestAngleDiff(current, target);
+  if (Math.abs(diff) <= maxDelta) return target;
+  return current + Math.sign(diff) * maxDelta;
+}
+
+function shipTargetAngle(ship, mirrored) {
+  const speed = Math.hypot(ship.vx, ship.vy);
+  if (speed > 0.02) return mirrored ? Math.atan2(ship.vy, -ship.vx) : Math.atan2(ship.vy, ship.vx);
+  if (ship.waypoint && ship.moving) {
+    const dx = ship.waypoint.x - ship.x, dy = ship.waypoint.y - ship.y;
+    if (Math.hypot(dx, dy) > 0.1) return mirrored ? Math.atan2(dy, -dx) : Math.atan2(dy, dx);
+  }
+  return null;
+}
+
+function updateDisplayAngle(store, key, ship, mirrored, dtSec) {
+  let current = store.get(key);
+  if (current === undefined) current = ship.angle;
+  const target = shipTargetAngle(ship, mirrored);
+  if (target !== null) current = lerpAngle(current, target, SHIP_TURN_RATE * dtSec);
+  store.set(key, current);
+  return current;
+}
+
+function shipsNeedRotationTick(game, displayAngles, mirrored) {
+  if (!game?.ships) return false;
+  for (const [shipRole, ships] of Object.entries(game.ships)) {
+    for (let index = 0; index < ships.length; index += 1) {
+      const ship = ships[index];
+      if (!ship?.hp) continue;
+      if (ship.moving || ship.braking || Math.hypot(ship.vx, ship.vy) > 0.02) return true;
+      const target = shipTargetAngle(ship, mirrored);
+      if (target === null) continue;
+      const current = displayAngles.get(`${shipRole}-${index}`) ?? ship.angle;
+      if (Math.abs(shortestAngleDiff(current, target)) > 0.015) return true;
+    }
+  }
+  return false;
+}
+
+function pointerToWorld(event, element, mirrored) {
+  const bounds = element.getBoundingClientRect();
+  let x = Math.max(0, Math.min(WORLD.width, (event.clientX - bounds.left) / bounds.width * WORLD.width));
+  const y = Math.max(0, Math.min(WORLD.height, (event.clientY - bounds.top) / bounds.height * WORLD.height));
+  if (mirrored) x = mirrorWorldX(x);
+  return { x, y };
+}
+
+function drawShip(ctx, ship, shipRole, displayAngle) {
+  const color = shipRole === 'host' ? '#5fe2d4' : '#f27b82';
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(displayAngle);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(SHIP_RADIUS, 0);
+  ctx.lineTo(-6, -4);
+  ctx.lineTo(-3, 0);
+  ctx.lineTo(-6, 4);
+  ctx.closePath();
+  ctx.fill();
+  if (ship.moving || ship.braking) {
+    ctx.strokeStyle = `${color}88`;
+    ctx.lineWidth = 0.8;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.arc(0, 0, SHIP_RADIUS + 3, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+function isWaypointHit(point, ship) { return Boolean(ship?.moving && ship.waypoint && Math.hypot(point.x - ship.waypoint.x, point.y - ship.waypoint.y) <= 10); }
+
+function drawWaypoint(ctx, ship, waypoint, hovered) {
+  ctx.save();
+  ctx.strokeStyle = '#5fe2d466';
+  ctx.lineWidth = 0.8;
+  ctx.setLineDash([4, 5]);
+  ctx.beginPath();
+  ctx.moveTo(ship.x, ship.y);
+  ctx.lineTo(waypoint.x, waypoint.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = hovered ? '#ff858b' : '#5fe2d4';
+  ctx.lineWidth = hovered ? 1.4 : 1;
+  ctx.beginPath();
+  ctx.arc(waypoint.x, waypoint.y, hovered ? 6 : 4, 0, Math.PI * 2);
+  ctx.stroke();
+  if (hovered) {
+    ctx.beginPath();
+    ctx.moveTo(waypoint.x - 2.5, waypoint.y - 2.5); ctx.lineTo(waypoint.x + 2.5, waypoint.y + 2.5);
+    ctx.moveTo(waypoint.x + 2.5, waypoint.y - 2.5); ctx.lineTo(waypoint.x - 2.5, waypoint.y + 2.5);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawCursorReadout(ctx, cursor, origin, bounds) {
   ctx.save(); ctx.font = '10px DM Mono'; ctx.textBaseline = 'middle';
-  const xValue = origin ? (cursor.x - origin.x) / 72 : cursor.x, yValue = origin ? (origin.y - cursor.y) / 42 : WORLD.height - cursor.y, text = `x ${formatCoordinate(xValue)}   y ${formatCoordinate(yValue)}`, paddingX = 8, height = 21, width = ctx.measureText(text).width + paddingX * 2, offsetX = 12 / bounds.width * WORLD.width, offsetY = 17 / bounds.height * WORLD.height, x = Math.min(cursor.x + offsetX, WORLD.width - width - 3), y = Math.min(cursor.y + offsetY, WORLD.height - height - 3);
-  ctx.fillStyle = '#05111ce8'; ctx.strokeStyle = '#58e7dcaa'; ctx.lineWidth = 0.75; ctx.fillRect(x, y, width, height); ctx.strokeRect(x, y, width, height); ctx.fillStyle = '#cffffa'; ctx.fillText(text, x + paddingX, y + height / 2 + 0.5); ctx.restore();
+  const xValue = origin ? (cursor.x - origin.x) / 72 : cursor.x, yValue = origin ? (origin.y - cursor.y) / 42 : WORLD.height - cursor.y;
+  const text = `x ${formatCoordinate(xValue)}   y ${formatCoordinate(yValue)}`, paddingX = 8, height = 21, width = ctx.measureText(text).width + paddingX * 2;
+  const offsetX = 12 / bounds.width * WORLD.width, offsetY = 17 / bounds.height * WORLD.height;
+  const x = Math.min(cursor.x + offsetX, WORLD.width - width - 3), y = Math.min(cursor.y + offsetY, WORLD.height - height - 3);
+  ctx.fillStyle = '#05111ce8'; ctx.strokeStyle = '#58e7dcaa'; ctx.lineWidth = 0.75;
+  ctx.fillRect(x, y, width, height); ctx.strokeRect(x, y, width, height);
+  ctx.fillStyle = '#cffffa'; ctx.fillText(text, x + paddingX, y + height / 2 + 0.5);
+  ctx.restore();
 }
+
 function formatCoordinate(value) { const rounded = Math.abs(value) < 0.005 ? 0 : value; return `${rounded >= 0 ? '+' : ''}${rounded.toFixed(2)}`; }
-function drawLaserTrail(ctx, trail, age) {
-  const { path, hit } = trail;
+
+function drawLaserTrail(ctx, trail, age, isFriendly) {
+  const { path, impact, maxDistance, pathLength: storedLength, flightDuration } = trail;
   if (path.length < 2) return;
-  const progress = Math.min(1, age / FLIGHT_TIME), end = Math.max(1, Math.ceil(progress * (path.length - 1))), fade = age <= FLIGHT_TIME ? 1 : Math.max(0, 1 - (age - FLIGHT_TIME) / TRAIL_FADE_TIME), segment = path.slice(0, end + 1), head = segment.at(-1), color = hit ? '#ffaf6c' : '#4ccfff';
-  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.globalAlpha = fade * 0.12; ctx.strokeStyle = color; ctx.lineWidth = 4.2; strokePath(ctx, segment); ctx.globalAlpha = fade * 0.26; ctx.lineWidth = 2.7; strokePath(ctx, segment); ctx.globalAlpha = fade * 0.55; ctx.strokeStyle = '#e9fbff'; ctx.lineWidth = 1.35; strokePath(ctx, segment); ctx.globalAlpha = fade * 0.8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.48; strokePath(ctx, segment); if (age <= FLIGHT_TIME) { ctx.globalAlpha = 0.85; ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(head.x, head.y, 1.8, 0, Math.PI * 2); ctx.fill(); } ctx.restore();
+  const flightTime = flightDuration || FLIGHT_TIME;
+  const totalLength = storedLength || pathLength(path);
+  const rangeLimit = totalLength || maxDistance || pathLength(path);
+  const progress = Math.min(1, age / flightTime);
+  const headDistance = progress * totalLength;
+  const fade = age <= flightTime ? 1 : Math.max(0, 1 - (age - flightTime) / TRAIL_FADE_TIME);
+  const head = pointAtDistance(path, headDistance).point;
+  const hitColor = isFriendly ? (impact ? '#ffaf6c' : '#4ccfff') : '#f04e5d';
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  for (let layer = 0; layer < 4; layer += 1) {
+    const widths = [4.2, 2.7, 1.35, 0.48];
+    const baseAlpha = [0.12, 0.26, 0.55, 0.8][layer];
+    ctx.lineWidth = widths[layer];
+    let traveled = 0;
+    for (let index = 1; index < path.length; index += 1) {
+      const from = path[index - 1], to = path[index];
+      const segment = Math.hypot(to.x - from.x, to.y - from.y);
+      if (segment <= 0) continue;
+      const segStart = traveled;
+      const segEnd = traveled + segment;
+      traveled = segEnd;
+      if (segEnd <= 0 || segStart >= headDistance) continue;
+      const t0 = (Math.max(segStart, 0) - segStart) / segment;
+      const t1 = (Math.min(segEnd, headDistance) - segStart) / segment;
+      const start = { x: from.x + (to.x - from.x) * t0, y: from.y + (to.y - from.y) * t0 };
+      const end = { x: from.x + (to.x - from.x) * t1, y: from.y + (to.y - from.y) * t1 };
+      // Keep the contrail continuous from its firing ship to the moving head.
+      // The beam still loses intensity toward its configured maximum range.
+      const rangeFade = 1 - Math.min(1, segEnd / rangeLimit) * 0.85;
+      const alpha = fade * baseAlpha * rangeFade;
+      if (alpha < 0.01) continue;
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = layer >= 2 ? '#e9fbff' : hitColor;
+      if (layer === 3) ctx.strokeStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.stroke();
+    }
+  }
+
+  if (age <= flightTime && progress < 1) {
+    ctx.globalAlpha = fade * 0.9;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = fade * 0.35;
+    ctx.fillStyle = hitColor;
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (age <= flightTime && progress >= 1 && trail.stopReason === 'range') {
+    ctx.globalAlpha = fade * 0.55;
+    ctx.fillStyle = hitColor;
+    ctx.beginPath();
+    ctx.arc(head.x, head.y, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
-function strokePath(ctx, path) { ctx.beginPath(); path.forEach((point, index) => index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)); ctx.stroke(); }
+
+function pointAtDistance(path, distance) {
+  if (distance <= 0 || path.length < 1) return { point: path[0], index: 0 };
+  let traveled = 0;
+  for (let index = 1; index < path.length; index += 1) {
+    const from = path[index - 1], to = path[index];
+    const segment = Math.hypot(to.x - from.x, to.y - from.y);
+    if (traveled + segment >= distance) {
+      const ratio = (distance - traveled) / segment;
+      return { point: { x: from.x + (to.x - from.x) * ratio, y: from.y + (to.y - from.y) * ratio }, index };
+    }
+    traveled += segment;
+  }
+  return { point: path.at(-1), index: path.length - 1 };
+}
+
+function pathLength(path) {
+  let total = 0;
+  for (let index = 1; index < path.length; index += 1) total += Math.hypot(path[index].x - path[index - 1].x, path[index].y - path[index - 1].y);
+  return total;
+}
+
 const FIRE_PARTICLE_COLORS = ['#fff4b0', '#ffcb42', '#f58a28', '#e14a1d', '#8f260f'];
 function drawImpactBurst(ctx, impact, age) { const progress = Math.min(1, age / BLOOM_DURATION), travel = 1 - Math.exp(-7 * progress), quickFade = progress < 0.12 ? 1 - 0.72 * (progress / 0.12) : 0.28 * Math.pow(1 - (progress - 0.12) / 0.88, 0.42), random = seededRandom(impact.seed || 1), shipBurst = impact.kind === 'ship', count = shipBurst ? 42 : 26; ctx.save(); for (let index = 0; index < count; index += 1) { const angle = random() * Math.PI * 2, speed = (shipBurst ? 16 : 10) + random() * (shipBurst ? 58 : 42), distance = speed * travel, radius = 1.5 + travel * (shipBurst ? 5 + random() * 4 : 2 + random() * 3), alpha = quickFade * (0.35 + random() * 0.55), x = impact.x + Math.cos(angle) * distance, y = impact.y + Math.sin(angle) * distance; ctx.globalAlpha = alpha; ctx.fillStyle = shipBurst && index % 3 !== 0 ? FIRE_PARTICLE_COLORS[Math.floor(random() * FIRE_PARTICLE_COLORS.length)] : index % 3 ? '#aab5bb' : '#e2e7e8'; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill(); } ctx.restore(); }
 
@@ -123,7 +419,6 @@ function drawPlanet(ctx, planet) {
 }
 
 function drawRings(ctx, planet, palette) { ctx.save(); ctx.translate(planet.x, planet.y); ctx.rotate(-0.22); ctx.strokeStyle = `${palette.cloud || palette.land}99`; ctx.lineWidth = Math.max(2, planet.r * 0.09); ctx.beginPath(); ctx.ellipse(0, 0, planet.r * 1.66, planet.r * 0.44, 0, 0, Math.PI * 2); ctx.stroke(); ctx.strokeStyle = `${palette.detail}bb`; ctx.lineWidth = Math.max(1, planet.r * 0.035); ctx.beginPath(); ctx.ellipse(0, 0, planet.r * 1.35, planet.r * 0.34, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
-
 function drawMoons(ctx, planet) { for (const moon of planet.moonBodies || []) { ctx.fillStyle = '#aebec4'; ctx.beginPath(); ctx.arc(moon.x, moon.y, moon.r, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#52636c'; ctx.lineWidth = 0.65; ctx.stroke(); } }
 
 function drawAsteroid(ctx, asteroid) {
