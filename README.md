@@ -44,10 +44,12 @@ npm run start  # Serve a production build
 - Each fleet has three ships; the host/player starts.
 - Select a surviving ship, then enter a permitted mathematical expression for `y = f(x)`.
 - The selected ship is `(0, 0)` in the expression’s local coordinate system.
-- A trajectory ends when it leaves the game world or reaches a planet or asteroid. A direct hit destroys one ship.
+- Constant vertical offsets are normalized away, so every trajectory begins at its selected ship even when the entered function contains a constant term.
+- A trajectory stops at planets, which remain in play; it destroys asteroids on contact; and a direct hit destroys one ship. A beam with no collision continues to the sector edge.
+- Shots render as timed laser pulses: the bright head follows the sampled path, leaves a short luminous tail, then fades away on impact. Planet impacts create an expanding gray debris burst; destroyed ships add a larger mix of gray hull fragments and fire-colored particles.
 - A malformed or unstable function loses the turn.
 - The first side with no surviving ships loses.
-- Every match generates a new board: each fleet spawns at random, separated positions inside its own third; two to six planets and a separated asteroid field are placed with enforced clearances. A bounded shared planet-volume budget means sparse boards have larger worlds while dense boards have smaller ones, with deliberately wide per-planet variation so a giant can coexist with much smaller bodies. Planets may enter each side’s territory, but remain at least three ship lengths from every ship.
+- Every match generates a new board: each fleet spawns at random, separated positions inside its own third; two to six planets and a separated asteroid field are placed with enforced clearances. A bounded shared planet-volume budget creates one or two dominant anchor worlds, with the remaining planets much smaller; dense boards therefore read as a few large landmarks surrounded by minor bodies. Planets may enter each side’s territory, but remain at least three ship lengths from every ship.
 
 The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, parentheses, `+`, `-`, `*`, `/`, `^`, and `sin`, `cos`, `tan`, `abs`, `sqrt`, `log`, and `exp`; it never evaluates submitted JavaScript.
 
@@ -59,11 +61,13 @@ The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, pa
 
 ### Game model
 
-[`app/match/[matchId]/game-model.js`](app/match/[matchId]/game-model.js) is a pure simulation module. It defines the fixed world dimensions, generates valid fleet and planet placements, traces expressions, resolves shots, advances turns, and selects basic bot shots. The same model is used for local and live matches.
+[`app/match/[matchId]/game-model.js`](app/match/[matchId]/game-model.js) is a pure simulation module. It defines the fixed world dimensions, generates valid fleet and planet placements, traces expressions, and applies the single `fire` action accepted by every participant. The bot only chooses a valid `fire` action; humans, the bot, and the live-match host all use the same action contract and state transition.
 
 ### Arena renderer
 
-[`app/match/[matchId]/arena-canvas.js`](app/match/[matchId]/arena-canvas.js) is the only module that draws the arena. It observes the stable CSS viewport, not the canvas element, and creates a device-pixel-ratio-aware backing buffer. World coordinates are scaled into that buffer at draw time. Planet texture seeds and types (`earthlike`, `marslike`, `venuslike`, `ice`, and `gas`) are part of match state, so both live peers see the same procedural worlds.
+[`app/match/[matchId]/arena-canvas.js`](app/match/[matchId]/arena-canvas.js) is the only module that draws the arena. It observes the stable CSS viewport, not the canvas element, and creates a device-pixel-ratio-aware backing buffer. World coordinates are scaled into that buffer at draw time. Planet texture seeds and types are part of match state, so both live peers see the same procedural worlds.
+
+Planet appearance follows a size-aware taxonomy: small bodies favor moons, Mercurian, lava, Pluto-like, and rocky worlds; middle sizes favor terrestrial, ocean, ice, super-Earth, and mini-Neptune worlds; the largest worlds favor Neptune/Uranus-like ice giants and Jupiter/Saturn-like gas giants. Large worlds can also carry decorative moonlets and rings.
 
 The arena viewport has a fixed 5:3 aspect ratio. On ultrawide layouts it remains centered with side space instead of stretching the game world.
 
@@ -87,4 +91,5 @@ The live-match host resolves gameplay state. This is appropriate for casual play
 - One anonymous live queue; waiting tickets expire after 90 seconds.
 - No accounts, persistence, matchmaking rating, reconnect flow, or spectating.
 - TURN is not configured.
-- The bot is intentionally simple: it searches for a clear direct arc rather than planning multi-turn strategy.
+- The bot is intentionally simple and does not plan multiple turns ahead.
+- The bot randomly selects a live ship and target, searches a small family of curved functions for an obstacle-free route, then has a 30% chance to submit that connecting `fire` action; otherwise it submits a randomized miss action.
