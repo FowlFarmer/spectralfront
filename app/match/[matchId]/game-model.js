@@ -7,13 +7,13 @@ export const BEAM_TRAVEL_SPEED = 2400;
 export const ENERGY_MAX = 100;
 export const ENERGY_REGEN = 4;
 export const BOT_ENERGY_REGEN = 2;
-export const MOVE_INITIAL_COST = 20;
+export const MOVE_INITIAL_COST = 10;
 export const MOVE_ENERGY_PER_SEC = 3;
 export const BEAM_DISTANCE_PER_POWER = 40;
 export const MAX_BEAM_DISTANCE = BEAM_DISTANCE_PER_POWER * 100;
-export const SHIP_MAX_SPEED = 2.13;
-export const SHIP_ACCEL = 1.47;
-export const SHIP_DECEL = 1.2;
+export const SHIP_MAX_SPEED = 6.39;
+export const SHIP_ACCEL = 4.41;
+export const SHIP_DECEL = 3.6;
 export const SIM_TICK_MS = 50;
 export const MATCH_COUNTDOWN_MS = 12_000;
 export const MATCH_OUTCOME_DELAY_MS = 2_000;
@@ -427,7 +427,7 @@ function findTacticalWaypoint(game, shooter, target) {
 }
 
 function solveRoute(game, shooter, target) {
-  const targetX = worldDistanceToGraphUnits(target.x - shooter.x), targetY = worldDistanceToGraphUnits(shooter.y - target.y);
+  const targetX = Math.abs(worldDistanceToGraphUnits(target.x - shooter.x)), targetY = worldDistanceToGraphUnits(shooter.y - target.y);
   if (Math.abs(targetX) < 0.05) return null;
   const slope = targetY / targetX;
   const curvatures = shuffle([-1.5, -1.1, -0.8, -0.55, -0.32, -0.18, 0, 0.18, 0.32, 0.55, 0.8, 1.1, 1.5]);
@@ -467,7 +467,8 @@ export function trace(source, ship, role, maxDistance = MAX_BEAM_DISTANCE) {
   let traveled = 0, previous = null;
   const graphLimit = Math.ceil(Math.hypot(WORLD.width, WORLD.height) / WORLD_UNITS_PER_GRAPH_UNIT) + 2;
   for (let index = 0; index < 520; index += 1) {
-    const x = direction * (index / 519) * graphLimit, y = fn(x) - originValue, worldX = ship.x + graphUnitsToWorldDistance(x), worldY = ship.y - graphUnitsToWorldDistance(y);
+    const localX = (index / 519) * graphLimit, y = fn(localX) - originValue;
+    const worldX = ship.x + direction * graphUnitsToWorldDistance(localX), worldY = ship.y - graphUnitsToWorldDistance(y);
     if (!Number.isFinite(y) || Math.abs(y) > 30 || worldY < 0 || worldY > WORLD.height || worldX < 0 || worldX > WORLD.width) break;
     const point = { x: worldX, y: worldY };
     if (previous) {

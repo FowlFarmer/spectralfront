@@ -54,6 +54,14 @@ const candidateDetails = candidate => {
     protocol: candidate?.protocol || raw.match(/^candidate:\S+\s+\d+\s+(udp|tcp)\b/i)?.[1]?.toLowerCase() || 'unknown',
   };
 };
+const safeIceEndpoint = value => {
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return 'unknown';
+  }
+};
 async function selectedCandidateDetails(pc) {
   const stats = await pc.getStats();
   const pair = [...stats.values()].find(report => report.type === 'candidate-pair' && (report.selected || (report.nominated && report.state === 'succeeded')));
@@ -228,7 +236,7 @@ export default function GameClient({ matchId }) {
         if (['connected', 'completed'].includes(pc.iceConnectionState)) selectedCandidateDetails(pc).then(details => reportWebRTC('selected_candidate_pair', details)).catch(() => {});
         if (pc.iceConnectionState === 'failed') candidatePairSummary(pc).then(reason => reportWebRTC('ice_candidate_pairs', { reason }, 'warn')).catch(() => {});
       };
-      pc.onicecandidateerror = event => reportWebRTC('ice_candidate_error', { code: event.errorCode, reason: event.errorText || 'ice-candidate-error' }, 'warn');
+      pc.onicecandidateerror = event => reportWebRTC('ice_candidate_error', { code: event.errorCode, reason: event.errorText || 'ice-candidate-error', endpoint: safeIceEndpoint(event.url) }, 'warn');
       pc.onicecandidate = event => {
         if (!event.candidate) {
           reportWebRTC('ice_gathering_complete');

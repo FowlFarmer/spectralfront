@@ -10,7 +10,7 @@ export const ARENA_NOTIFICATIONS = Object.freeze({
   pathBlocked: { enabled: true, message: 'Route blocked by obstacle.', accent: '#e7bd61' },
   moveOrdered: { enabled: true, message: 'Ship moving to waypoint.', accent: '#55d5cc' },
   moveCancelled: { enabled: true, message: 'Ship braking to stop.', accent: '#8cb4cc' },
-  notEnoughEnergyMove: { enabled: true, message: 'Not enough energy to move — need 20 to start.', accent: '#e7bd61' },
+  notEnoughEnergyMove: { enabled: true, message: 'Not enough energy to move — need 10 to start.', accent: '#e7bd61' },
   notEnoughEnergyFire: { enabled: true, message: 'Not enough energy to fire at this power.', accent: '#e7bd61' },
   outOfEnergyMoving: { enabled: true, message: 'Energy depleted — ship braking to a stop.', accent: '#e7bd61' },
   enemyShipDestroyed: { enabled: true, message: 'Enemy ship destroyed.', accent: '#55e6a8' },

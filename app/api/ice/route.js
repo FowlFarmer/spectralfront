@@ -35,7 +35,9 @@ async function meteredIceServers() {
   try {
     const response = await fetch(endpoint, { cache: 'no-store' });
     if (!response.ok) {
-      console.warn('[spectral-front:ice] metered_credential_fetch_failed', JSON.stringify({ status: response.status }));
+      const failure = await response.json().catch(() => ({}));
+      const reason = typeof failure?.error === 'string' ? failure.error : typeof failure?.message === 'string' ? failure.message : 'provider-rejected-request';
+      console.warn('[spectral-front:ice] metered_credential_fetch_failed', JSON.stringify({ status: response.status, reason: reason.slice(0, 120) }));
       return staticMeteredIceServers();
     }
     const servers = validIceServers(await response.json());

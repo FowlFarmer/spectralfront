@@ -89,7 +89,7 @@ npm run start  # Serve a production build
 
 - With a ship selected, **click space** to set a waypoint. The ship accelerates smoothly toward it, rotates to face travel direction, and decelerates into arrival without snapping to the destination.
 - **Click again while moving** to cancel — the ship brakes to a stop at its current position.
-- Movement costs **20 energy** to start and **6 energy/sec** while actively moving. If energy runs out mid-route, the ship brakes automatically.
+- Movement costs **10 energy** to start and **3 energy/sec** while actively moving. If energy runs out mid-route, the ship brakes automatically.
 - Waypoints use **straight-line segments**, validated against planets, moons, and asteroids (ships may overlap). There is no pathfinding — only direct, obstacle-checked routes.
 - Movement commands are `{ type: 'move', role, shipIndex, x, y }` and `{ type: 'cancelMove', role, shipIndex }`.
 
@@ -104,6 +104,7 @@ Every match generates a new board: each fleet spawns at random, separated positi
 ### View
 
 - The guest/client view is **mirrored horizontally** so your fleet always appears on the left. Clicks are transformed back to world coordinates before being sent to the host.
+- Graph coordinates are local to the selected ship for both commanders: positive `x` always points toward the opposing side of the displayed arena, and positive `y` points upward. The host applies the guest’s action as `role: 'guest'`, then projects that same local graph into leftward world space.
 - Waypoint lines and planned movement remain **owner-only**. Opponents can see a ship’s live position, heading, and movement, but not its chosen destination or planned route.
 
 The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, parentheses, `+`, `-`, `*`, `/`, `^`, and `sin`, `cos`, `tan`, `abs`, `sqrt`, `log`, `ln`, and `exp`; `ln` is an alias for the natural logarithm. It never evaluates submitted JavaScript.

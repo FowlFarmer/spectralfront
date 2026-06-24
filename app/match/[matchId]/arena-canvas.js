@@ -68,7 +68,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
         drawShip(ctx, ship, shipRole, displayAngle);
       }
     }
-    if (cursor) drawCursorReadout(ctx, cursor, origin, bounds);
+    if (cursor) drawCursorReadout(ctx, cursor, origin, bounds, mirrored);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }, [cursor, expression, game, mirrored, now, power, previewDisabled, role, selected, waypointHovered]);
 
@@ -270,9 +270,9 @@ function drawWaypoint(ctx, ship, waypoint, hovered) {
   ctx.restore();
 }
 
-function drawCursorReadout(ctx, cursor, origin, bounds) {
+function drawCursorReadout(ctx, cursor, origin, bounds, mirrored) {
   ctx.save(); ctx.font = '10px DM Mono'; ctx.textBaseline = 'middle';
-  const xValue = origin ? worldDistanceToGraphUnits(cursor.x - origin.x) : worldDistanceToGraphUnits(cursor.x);
+  const xValue = origin ? worldDistanceToGraphUnits((mirrored ? origin.x - cursor.x : cursor.x - origin.x)) : worldDistanceToGraphUnits(cursor.x);
   const yValue = origin ? worldDistanceToGraphUnits(origin.y - cursor.y) : worldDistanceToGraphUnits(WORLD.height - cursor.y);
   const text = `x ${formatCoordinate(xValue)}   y ${formatCoordinate(yValue)}`, paddingX = 8, height = 21, width = ctx.measureText(text).width + paddingX * 2;
   const offsetX = 12 / bounds.width * WORLD.width, offsetY = 17 / bounds.height * WORLD.height;

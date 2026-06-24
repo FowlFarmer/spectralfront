@@ -11,7 +11,7 @@ const allowedEvents = new Set([
   'answer_sent', 'answer_received', 'remote_description_set', 'remote_candidate_received', 'remote_candidate_queued', 'remote_candidate_added', 'remote_candidate_complete', 'remote_candidate_error', 'signal_poll_error',
   'signal_send_error', 'peer_disconnected', 'peer_connection_error', 'match_transport_ready',
 ]);
-const allowedDetailKeys = new Set(['state', 'candidateType', 'protocol', 'route', 'remoteCandidateType', 'channel', 'code', 'reason', 'iceServerCount', 'turnServerCount']);
+const allowedDetailKeys = new Set(['state', 'candidateType', 'protocol', 'route', 'remoteCandidateType', 'channel', 'code', 'reason', 'endpoint', 'iceServerCount', 'turnServerCount']);
 
 function safeDetails(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
