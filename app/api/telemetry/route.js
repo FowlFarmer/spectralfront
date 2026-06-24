@@ -6,9 +6,9 @@ export const dynamic = 'force-dynamic';
 
 const allowedEvents = new Set([
   'peer_created', 'ice_servers_received', 'ice_candidate', 'ice_gathering_complete', 'ice_gathering_state',
-  'ice_connection_state', 'peer_connection_state', 'signaling_state', 'ice_candidate_error', 'selected_candidate_pair',
+  'ice_connection_state', 'peer_connection_state', 'signaling_state', 'ice_candidate_error', 'ice_candidate_pairs', 'selected_candidate_pair',
   'data_channel_received', 'data_channel_open', 'data_channel_close', 'data_channel_error', 'offer_sent', 'offer_received',
-  'answer_sent', 'answer_received', 'remote_description_set', 'remote_candidate_received', 'remote_candidate_queued', 'remote_candidate_added', 'remote_candidate_error', 'signal_poll_error',
+  'answer_sent', 'answer_received', 'remote_description_set', 'remote_candidate_received', 'remote_candidate_queued', 'remote_candidate_added', 'remote_candidate_complete', 'remote_candidate_error', 'signal_poll_error',
   'signal_send_error', 'peer_disconnected', 'peer_connection_error', 'match_transport_ready',
 ]);
 const allowedDetailKeys = new Set(['state', 'candidateType', 'protocol', 'route', 'remoteCandidateType', 'channel', 'code', 'reason', 'iceServerCount', 'turnServerCount']);

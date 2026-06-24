@@ -61,6 +61,13 @@ async function selectedCandidateDetails(pc) {
   const local = stats.get(pair.localCandidateId), remote = stats.get(pair.remoteCandidateId);
   return { route: local?.candidateType || 'unknown', remoteCandidateType: remote?.candidateType || 'unknown', protocol: local?.protocol || 'unknown' };
 }
+async function candidatePairSummary(pc) {
+  const stats = await pc.getStats();
+  return [...stats.values()].filter(report => report.type === 'candidate-pair').slice(0, 12).map(pair => {
+    const local = stats.get(pair.localCandidateId), remote = stats.get(pair.remoteCandidateId);
+    return `${local?.candidateType || '?'}>${remote?.candidateType || '?'}:${pair.state}`;
+  }).join(', ') || 'no-candidate-pairs';
+}
 
 export default function GameClient({ matchId }) {
   const router = useRouter(), isBotMatch = matchId.startsWith('bot-');
@@ -75,8 +82,7 @@ export default function GameClient({ matchId }) {
   const send = useCallback(message => { if (channel.current?.readyState === 'open') channel.current.send(JSON.stringify(message)); }, []);
   const reportWebRTC = useCallback((event, details = {}, level = 'info') => {
     if (isBotMatch) return;
-    const entry = { event, details };
-    console[level](`[spectral-front:webrtc] ${event}`, entry);
+    console[level](`[spectral-front:webrtc] ${event} ${JSON.stringify(details)}`);
     const ticket = session.current?.ticket;
     if (ticket) fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket, event, details }) }).catch(() => {});
   }, [isBotMatch]);
@@ -220,10 +226,15 @@ export default function GameClient({ matchId }) {
       pc.oniceconnectionstatechange = () => {
         reportWebRTC('ice_connection_state', { state: pc.iceConnectionState }, ['failed', 'disconnected'].includes(pc.iceConnectionState) ? 'warn' : 'info');
         if (['connected', 'completed'].includes(pc.iceConnectionState)) selectedCandidateDetails(pc).then(details => reportWebRTC('selected_candidate_pair', details)).catch(() => {});
+        if (pc.iceConnectionState === 'failed') candidatePairSummary(pc).then(reason => reportWebRTC('ice_candidate_pairs', { reason }, 'warn')).catch(() => {});
       };
       pc.onicecandidateerror = event => reportWebRTC('ice_candidate_error', { code: event.errorCode, reason: event.errorText || 'ice-candidate-error' }, 'warn');
       pc.onicecandidate = event => {
-        if (!event.candidate) { reportWebRTC('ice_gathering_complete'); return; }
+        if (!event.candidate) {
+          reportWebRTC('ice_gathering_complete');
+          request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'candidate', candidate: null } }) }).catch(error => reportWebRTC('signal_send_error', { reason: error.message }, 'warn'));
+          return;
+        }
         reportWebRTC('ice_candidate', candidateDetails(event.candidate));
         request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'candidate', candidate: event.candidate } }) }).catch(error => reportWebRTC('signal_send_error', { reason: error.message }, 'warn'));
       };
@@ -238,7 +249,7 @@ export default function GameClient({ matchId }) {
         }
         try {
           await pc.addIceCandidate(candidate);
-          reportWebRTC('remote_candidate_added', candidateDetails(candidate));
+          reportWebRTC(candidate ? 'remote_candidate_added' : 'remote_candidate_complete', candidate ? candidateDetails(candidate) : {});
         } catch (error) {
           reportWebRTC('remote_candidate_error', { ...candidateDetails(candidate), reason: error.message }, 'warn');
         }
