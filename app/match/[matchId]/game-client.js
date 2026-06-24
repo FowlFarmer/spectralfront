@@ -150,15 +150,16 @@ export default function GameClient({ matchId }) {
 
   const submitAction = useCallback(action => {
     const me = session.current?.role;
+    const actingShip = gameRef.current?.ships[me]?.[action.shipIndex];
     if (gameRef.current?.phase !== 'live') {
       pushNotice('combatStaging');
       return;
     }
-    if (action.type === 'fire' && gameRef.current?.energy[me] < fireEnergyCost(action.power ?? 100)) {
+    if (action.type === 'fire' && (!actingShip || actingShip.energy < fireEnergyCost(action.power ?? 100))) {
       pushNotice('notEnoughEnergyFire');
       return;
     }
-    if (action.type === 'move' && gameRef.current?.energy[me] < MOVE_INITIAL_COST) {
+    if (action.type === 'move' && (!actingShip || actingShip.energy < MOVE_INITIAL_COST)) {
       pushNotice('notEnoughEnergyMove');
       return;
     }
@@ -295,8 +296,8 @@ export default function GameClient({ matchId }) {
 
   if (!game || problem) return <div className="game-shell"><header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div></header><section className="disconnected standalone"><div>{!problem && <div className="spinner" />}<h2>{problem ? 'Match unavailable' : 'Setting up the duel'}</h2><p>{problem || 'Securing a direct browser connection…'}</p><button className="primary" onClick={leave}>BACK TO LOBBY</button></div></section></div>;
 
-  const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], matchOver = isMatchOver(game), combatLocked = isCombatLocked(game), combatActive = game.phase === 'live', won = game.outcome === me;
-  const myEnergy = game.energy[me], fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
+  const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], selectedShip = game.ships[me][selected], matchOver = isMatchOver(game), combatLocked = isCombatLocked(game), combatActive = game.phase === 'live', won = game.outcome === me;
+  const myEnergy = selectedShip?.energy ?? 0, fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
   const countdownSeconds = Math.max(0, Math.ceil(((game.countdownMs ?? MATCH_COUNTDOWN_MS) - (game.simTime || 0)) / 1000));
   const canFire = combatActive && !combatLocked && myShips[selected]?.hp && myEnergy >= fireCost;
   const fireCurrent = () => {
@@ -311,19 +312,10 @@ export default function GameClient({ matchId }) {
       <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><button className="leave" onClick={leave}>LEAVE MATCH</button></header>
       <main className="game-grid">
         <aside className="panel side">
-          <div>
-            <div className="label">ENERGY</div>
-            <div className="energy-bar" aria-label={`Energy ${Math.round(myEnergy)} of ${ENERGY_MAX}`}>
-              <div className="energy-fill" style={{ width: `${(myEnergy / ENERGY_MAX) * 100}%` }} />
-              <span><b>ENERGY</b>{Math.round(myEnergy)}<i>/ {ENERGY_MAX}</i></span>
-            </div>
+          <div className="fleet-command player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · LEFT CLICK TO MOVE'}</small>
+            <div className="ship-select">{myShips.map((ship, index) => <div className="ship-command" key={index}><button disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button><div className="ship-energy" aria-label={`Ship ${index + 1} energy ${Math.round(ship.energy)} of ${ENERGY_MAX}`}><div className="ship-energy-fill" style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /><span>{Math.round(ship.energy)}<i> / {ENERGY_MAX}</i></span></div></div>)}</div>
           </div>
-          <div>
-            <div className="player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · LEFT CLICK TO MOVE'}</small>
-              <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button>)}</div>
-            </div>
-            <div className="player enemy"><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'NAVIGATION AI' : 'OPPOSING FLEET'}</small><div className="dots">{'● '.repeat(liveShips(game, foe).length) || '—'}</div></div>
-          </div>
+          <div className="player enemy"><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'NAVIGATION AI · LIVE RESERVES' : 'LIVE ENERGY TELEMETRY'}</small><div className="enemy-ship-list">{game.ships[foe].map((ship, index) => <div className={'enemy-ship ' + (!ship.hp ? 'lost' : '')} key={index}><b>SHIP {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-label={`Enemy ship ${index + 1} energy ${Math.round(ship.energy)} of ${ENERGY_MAX}`}><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? Math.round(ship.energy) : 'LOST'}</span></div>)}</div></div>
           <div className="rules">{combatActive ? 'Live combat — energy regenerates slowly. Left click to move a selected ship; click the waypoint to stop. Your fleet always appears on the left.' : 'Staging sequence — systems remain locked until the launch signal.'}</div>
         </aside>
         <section className="panel arena-wrap">

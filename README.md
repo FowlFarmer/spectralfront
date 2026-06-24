@@ -68,8 +68,8 @@ npm run start  # Serve a production build
 ### Live combat
 
 - There are **no turns**. Both players act at the same time, limited only by energy and match state.
-- Every match begins with a synchronized **12-second staging countdown**. Ships spawn with zero energy; weapons and movement are locked until the launch signal, then energy begins regenerating.
-- Each player has a shared **energy pool** (100 max, regenerates at **4/sec**). In bot training, the bot pool regenerates at **2/sec**.
+- Every match begins with a synchronized **5-second staging countdown**. Ships spawn with zero energy; weapons and movement are locked until the launch signal, then energy begins regenerating.
+- Every surviving ship owns its own **energy pool** (100 max, regenerates at **2/sec**). Firing and movement only spend the selected ship’s energy; the bot follows the same per-ship rule.
 - Firing and movement both consume energy. You can fire again immediately after a shot as long as you have enough energy — beam animations are visual only and do not lock input.
 
 ### Firing
@@ -89,7 +89,7 @@ npm run start  # Serve a production build
 
 - With a ship selected, **click space** to set a waypoint. The ship accelerates smoothly toward it, rotates to face travel direction, and decelerates into arrival without snapping to the destination.
 - **Click again while moving** to cancel — the ship brakes to a stop at its current position.
-- Movement costs **10 energy** to start and **3 energy/sec** while actively moving. If energy runs out mid-route, the ship brakes automatically.
+- Movement costs the selected ship **25 energy** to start and **3 energy/sec** while actively moving. If that ship runs out mid-route, it brakes automatically.
 - Waypoints use **straight-line segments**, validated against planets, moons, and asteroids (ships may overlap). There is no pathfinding — only direct, obstacle-checked routes.
 - Movement commands are `{ type: 'move', role, shipIndex, x, y }` and `{ type: 'cancelMove', role, shipIndex }`.
 
@@ -99,7 +99,7 @@ npm run start  # Serve a production build
 
 ### Board generation
 
-Every match generates a new board: each fleet spawns at random, separated positions inside its own third; two to six planets and a separated asteroid field are placed with enforced clearances. A bounded shared planet-volume budget creates one or two dominant anchor worlds, with the remaining planets much smaller. Planets may enter each side’s territory, but remain at least three ship lengths from every ship.
+Every match generates a new board: each fleet spawns as four random, separated ships inside its own third; two to six planets and a separated asteroid field are placed with enforced clearances. A bounded shared planet-volume budget creates one or two dominant anchor worlds, with the remaining planets much smaller. Planets may enter each side’s territory, but remain at least three ship lengths from every ship.
 
 ### View
 

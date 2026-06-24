@@ -39,7 +39,7 @@ export const SPLASH_LINES = [
   { top: 'Slurp enemies through', accent: 'a sine wave straw.' },
   { top: 'Be so for real', accent: 'with that slope.' },
   { top: 'Mother said', accent: "it's just ships." },
-  { top: 'Real sigma energy is', accent: 'spending 10 energy to move at full burn.' },
+  { top: 'Real sigma energy is', accent: 'spending 25 energy to move at full burn.' },
   { top: 'The planets are', accent: 'on their side btw.' },
   { top: 'Live, laugh,', accent: 'logarithm.' },
   { top: 'Touch grass?', accent: 'Touch function generator.' },
