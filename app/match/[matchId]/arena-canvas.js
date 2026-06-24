@@ -6,6 +6,7 @@ import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD, beamDistanceForPower, mirrorWorldX,
 export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', power = 100, previewDisabled = false }) {
   const viewport = useRef(null), canvas = useRef(null);
   const eventStarts = useRef(new Map());
+  const trailPaths = useRef(new Map());
   const displayAngles = useRef(new Map());
   const lastFrameTime = useRef(performance.now());
   const [now, setNow] = useState(() => performance.now()), [cursor, setCursor] = useState(null), [waypointHovered, setWaypointHovered] = useState(false);
@@ -48,7 +49,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
     for (const trail of game.trails || []) {
       const age = eventAge(trail);
       const flightTime = trail.flightDuration || FLIGHT_TIME;
-      if (age < flightTime + TRAIL_FADE_TIME) drawLaserTrail(ctx, trail, age, trail.role === role);
+      if (age < flightTime + TRAIL_FADE_TIME) drawLaserTrail(ctx, trail, visualPathForTrail(trail, trailPaths.current), age, trail.role === role);
     }
     for (const bloom of game.blooms || []) {
       const age = eventAge(bloom);
@@ -78,6 +79,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
     const events = [...(game.trails || []), ...(game.blooms || [])], activeIds = new Set(events.map(event => event.id)), startedAt = performance.now();
     for (const event of events) if (!eventStarts.current.has(event.id)) eventStarts.current.set(event.id, startedAt);
     for (const id of eventStarts.current.keys()) if (!activeIds.has(id)) eventStarts.current.delete(id);
+    for (const id of trailPaths.current.keys()) if (!activeIds.has(id)) trailPaths.current.delete(id);
     const hasActiveEvent = time => (game.trails || []).some(trail => {
       const flightTime = trail.flightDuration || FLIGHT_TIME;
       return time - eventStarts.current.get(trail.id) < flightTime + TRAIL_FADE_TIME;
@@ -283,8 +285,29 @@ function drawCursorReadout(ctx, cursor, origin, bounds) {
 
 function formatCoordinate(value) { const rounded = Math.abs(value) < 0.005 ? 0 : value; return `${rounded >= 0 ? '+' : ''}${rounded.toFixed(2)}`; }
 
-function drawLaserTrail(ctx, trail, age, isFriendly) {
-  const { path, impact, maxDistance, pathLength: storedLength, flightDuration } = trail;
+function visualPathForTrail(trail, cache) {
+  const cached = cache.get(trail.id);
+  if (cached) return cached;
+  const fullPath = trace(trail.expression, trail.origin, trail.role, trail.maxDistance);
+  const path = trail.impact ? clipPathAtImpact(fullPath, trail.impact) : fullPath;
+  cache.set(trail.id, path);
+  return path;
+}
+
+function clipPathAtImpact(path, impact) {
+  if (!path.length) return path;
+  let closestIndex = 0, closestDistance = Infinity;
+  for (let index = 0; index < path.length; index += 1) {
+    const point = path[index], distance = Math.hypot(point.x - impact.x, point.y - impact.y);
+    if (distance < closestDistance) { closestDistance = distance; closestIndex = index; }
+  }
+  const clipped = path.slice(0, closestIndex + 1);
+  clipped[clipped.length - 1] = { x: impact.x, y: impact.y };
+  return clipped;
+}
+
+function drawLaserTrail(ctx, trail, path, age, isFriendly) {
+  const { impact, maxDistance, pathLength: storedLength, flightDuration } = trail;
   if (path.length < 2) return;
   const flightTime = flightDuration || FLIGHT_TIME;
   const totalLength = storedLength || pathLength(path);

@@ -41,7 +41,7 @@ export const measurePathLength = path => {
 
 export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { botMatch = false } = {}) => {
   const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets);
-  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), lastPath: [], lastShot: null, trails: [], blooms: [], energy: { host: 0, guest: 0 }, energyRegen: { host: ENERGY_REGEN, guest: botMatch ? BOT_ENERGY_REGEN : ENERGY_REGEN }, ships, planets, asteroids };
+  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), trails: [], blooms: [], energy: { host: 0, guest: 0 }, energyRegen: { host: ENERGY_REGEN, guest: botMatch ? BOT_ENERGY_REGEN : ENERGY_REGEN }, ships, planets, asteroids };
 };
 
 function createShip(x, y, role) {
@@ -135,7 +135,6 @@ const cloneGame = game => ({
   ...game,
   energy: { ...game.energy },
   ships: { host: game.ships.host.map(cloneShip), guest: game.ships.guest.map(cloneShip) },
-  lastPath: [...game.lastPath],
   trails: [...(game.trails || [])],
   blooms: [...(game.blooms || [])],
 });
@@ -276,15 +275,14 @@ function applyFire(game, action) {
     const targetIndex = next.ships[ROLES[role]].findIndex(ship => ship.hp && Math.hypot(point.x - ship.x, point.y - ship.y) < SHIP_RADIUS);
     if (targetIndex >= 0) { impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1, shipRole: ROLES[role], shipIndex: targetIndex }; break; }
   }
-  const visualPath = resolvedPath;
-  const pathLength = measurePathLength(visualPath);
+  const pathLength = measurePathLength(resolvedPath);
   const stopReason = impact ? 'impact' : classifyPathStop(pathLength, maxDistance);
-  next.lastPath = resolvedPath; next.shotNumber = (game.shotNumber || 0) + 1;
-  next.lastShot = {
-    id: next.shotNumber, role, path: visualPath, impact, outbound: stopReason === 'bounds',
+  next.shotNumber = (game.shotNumber || 0) + 1;
+  const trail = {
+    id: next.shotNumber, role, shipIndex, expression, origin: { x: ship.x, y: ship.y }, impact,
     maxDistance, power: clampedPower, stopReason, pathLength, flightDuration: beamFlightDuration(pathLength),
   };
-  next.trails = [...(next.trails || []), next.lastShot].slice(-8);
+  next.trails = [...(next.trails || []), trail].slice(-8);
   if (action.bot) { next.botLastShotAt = next.simTime; next.botShotsSinceRoam = (next.botShotsSinceRoam || 0) + 1; }
   let hit = false;
   if (impact?.kind === 'asteroid') next.asteroids = next.asteroids.filter(asteroid => asteroid.id !== impact.asteroidId);

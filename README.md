@@ -100,7 +100,7 @@ The expression parser is deliberately limited. It accepts numbers, `x`, `pi`, pa
 | `move` | Validate segment, deduct initial energy, assign waypoint |
 | `cancelMove` | Begin smooth braking |
 
-The host runs `advanceSimulation()` every **50 ms** to regenerate energy and update ship velocity/position. Live guests send actions to the host and receive full state snapshots (including simulation events such as out-of-energy movement stops).
+The host runs `advanceSimulation()` every **50 ms** to regenerate energy and update ship velocity/position. Live guests send literal fire/move actions to the host and receive authoritative state snapshots (including simulation events such as out-of-energy movement stops).
 
 ### Arena renderer
 
@@ -111,7 +111,7 @@ The host runs `advanceSimulation()` every **50 ms** to regenerate energy and upd
 - Dotted **trajectory preview** for the selected ship
 - Distance-based **beam animation** and range fade
 
-Planet texture seeds and types are part of match state, so both live peers see the same procedural worlds. Laser and impact events carry a stable shot id and deterministic impact data; each renderer starts its visual clock when it receives that event.
+Planet texture seeds and types are part of match state, so both live peers see the same procedural worlds. Laser events carry a stable shot id, literal expression, frozen firing origin, range, and deterministic impact data—but never sampled trajectory points. Each renderer recreates the beam locally, clips it to the authoritative endpoint, and starts its visual clock when it receives that event.
 
 Planet appearance follows a size-aware taxonomy: small bodies favor moons, Mercurian, lava, Pluto-like, and rocky worlds; middle sizes favor terrestrial, ocean, ice, super-Earth, and mini-Neptune worlds; the largest worlds favor Neptune/Uranus-like ice giants and Jupiter/Saturn-like gas giants. Large worlds can also carry decorative moonlets and rings.
 
