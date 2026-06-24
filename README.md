@@ -29,7 +29,23 @@ UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
 ```
 
-The WebRTC configuration currently includes Google’s public STUN server. TURN is intentionally not configured, so some restrictive networks will be unable to establish a live peer-to-peer connection.
+The WebRTC configuration always includes a public STUN server. When Metered TURN variables are configured, the authenticated ICE endpoint also fetches Metered’s ICE-server array and offers TURN as an automatic relay fallback. WebRTC still prefers a direct peer-to-peer path.
+
+### Metered TURN on Vercel
+
+1. In Metered, create a TURN credential. In **Dashboard → Developers**, copy the Metered domain (for example, `your-app.metered.live`) and the credential’s API key. Metered’s credential endpoint returns the complete STUN/TURN ICE-server array.
+2. In Vercel, open **Project → Settings → Environment Variables** and add these values to **Production** (and Preview if you want preview deployments to support live matches):
+
+   ```bash
+   METERED_TURN_DOMAIN=your-app.metered.live
+   METERED_TURN_API_KEY=your-metered-credential-api-key
+   METERED_TURN_REGION=global
+   ```
+
+   `METERED_TURN_REGION` is optional; omit it to use Metered’s configured default. Do not use a `NEXT_PUBLIC_` prefix for either secret.
+3. Redeploy the Vercel project. A matched player then requests `/api/ice`; that endpoint validates the match ticket before returning the Metered relay credentials to the browser.
+
+For local live-match testing, put the same values in `.env.local`. If Metered is not configured or temporarily unavailable, the app remains STUN-only rather than blocking a match.
 
 ## Commands
 
