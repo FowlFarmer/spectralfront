@@ -229,6 +229,25 @@ export default function GameClient({ matchId }) {
       };
       const reportDisconnect = () => { reportWebRTC('peer_disconnected', { state: pc.connectionState }, 'warn'); if (!isMatchOver(gameRef.current)) setProblem('Connection lost. The other commander or their network left the duel.'); };
       pc.onconnectionstatechange = () => { reportWebRTC('peer_connection_state', { state: pc.connectionState }, ['failed', 'disconnected'].includes(pc.connectionState) ? 'warn' : 'info'); if (['failed', 'disconnected'].includes(pc.connectionState)) reportDisconnect(); };
+      const pendingRemoteCandidates = [];
+      const addRemoteCandidate = async candidate => {
+        if (!pc.remoteDescription) {
+          pendingRemoteCandidates.push(candidate);
+          reportWebRTC('remote_candidate_queued', candidateDetails(candidate));
+          return;
+        }
+        try {
+          await pc.addIceCandidate(candidate);
+          reportWebRTC('remote_candidate_added', candidateDetails(candidate));
+        } catch (error) {
+          reportWebRTC('remote_candidate_error', { ...candidateDetails(candidate), reason: error.message }, 'warn');
+        }
+      };
+      const setRemoteDescription = async (description, source) => {
+        await pc.setRemoteDescription(description);
+        reportWebRTC('remote_description_set', { state: pc.signalingState, reason: source });
+        while (pendingRemoteCandidates.length) await addRemoteCandidate(pendingRemoteCandidates.shift());
+      };
       const open = dataChannel => {
         channel.current = dataChannel;
         dataChannel.onopen = () => { reportWebRTC('data_channel_open', { channel: dataChannel.label }); setLink('DIRECT LINK'); if (stored.role === 'host') { const initial = createMatch(); send({ type: 'state', state: initial }); publish(initial); } reportWebRTC('match_transport_ready', { channel: dataChannel.label }); };
@@ -247,7 +266,7 @@ export default function GameClient({ matchId }) {
       if (stored.role === 'host') { open(pc.createDataChannel('match', { ordered: true })); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'offer', sdp: offer } }) }); reportWebRTC('offer_sent'); }
       let cancelled = false;
       let lastSignalFailureAt = 0;
-      (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { reportWebRTC('offer_received'); await pc.setRemoteDescription(message.sdp); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); reportWebRTC('answer_sent'); } if (message.type === 'answer' && stored.role === 'host') { await pc.setRemoteDescription(message.sdp); reportWebRTC('answer_received'); } if (message.type === 'candidate') { reportWebRTC('remote_candidate_received', candidateDetails(message.candidate)); await pc.addIceCandidate(message.candidate).catch(error => reportWebRTC('remote_candidate_error', { reason: error.message }, 'warn')); } if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) { reportWebRTC('peer_disconnected', { reason: 'peer-left' }, 'warn'); setProblem('The other commander left the duel.'); } } } catch (error) { if (Date.now() - lastSignalFailureAt > 5000) { lastSignalFailureAt = Date.now(); reportWebRTC('signal_poll_error', { reason: error.message }, 'warn'); } } await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
+      (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { reportWebRTC('offer_received'); await setRemoteDescription(message.sdp, 'offer'); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); reportWebRTC('answer_sent'); } if (message.type === 'answer' && stored.role === 'host') { await setRemoteDescription(message.sdp, 'answer'); reportWebRTC('answer_received'); } if (message.type === 'candidate') { reportWebRTC('remote_candidate_received', candidateDetails(message.candidate)); await addRemoteCandidate(message.candidate); } if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) { reportWebRTC('peer_disconnected', { reason: 'peer-left' }, 'warn'); setProblem('The other commander left the duel.'); } } } catch (error) { if (Date.now() - lastSignalFailureAt > 5000) { lastSignalFailureAt = Date.now(); reportWebRTC('signal_poll_error', { reason: error.message }, 'warn'); } } await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
       return () => { cancelled = true; };
     } catch (error) { reportWebRTC('peer_connection_error', { reason: error.message }, 'warn'); setProblem(error.message); }
   }, [commitAction, isBotMatch, matchId, notifyEvents, publish, reportWebRTC, router, send]);
