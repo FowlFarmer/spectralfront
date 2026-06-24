@@ -47,6 +47,21 @@ const fireNoticeEvents = (result, shooterRole) => {
   return events;
 };
 
+const candidateDetails = candidate => {
+  const raw = candidate?.candidate || '';
+  return {
+    candidateType: candidate?.type || raw.match(/\btyp\s+(host|srflx|prflx|relay)\b/)?.[1] || 'unknown',
+    protocol: candidate?.protocol || raw.match(/^candidate:\S+\s+\d+\s+(udp|tcp)\b/i)?.[1]?.toLowerCase() || 'unknown',
+  };
+};
+async function selectedCandidateDetails(pc) {
+  const stats = await pc.getStats();
+  const pair = [...stats.values()].find(report => report.type === 'candidate-pair' && (report.selected || (report.nominated && report.state === 'succeeded')));
+  if (!pair) return { route: 'unknown' };
+  const local = stats.get(pair.localCandidateId), remote = stats.get(pair.remoteCandidateId);
+  return { route: local?.candidateType || 'unknown', remoteCandidateType: remote?.candidateType || 'unknown', protocol: local?.protocol || 'unknown' };
+}
+
 export default function GameClient({ matchId }) {
   const router = useRouter(), isBotMatch = matchId.startsWith('bot-');
   const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
@@ -58,6 +73,13 @@ export default function GameClient({ matchId }) {
 
   const publish = useCallback(next => { gameRef.current = next; setGame(next); }, []);
   const send = useCallback(message => { if (channel.current?.readyState === 'open') channel.current.send(JSON.stringify(message)); }, []);
+  const reportWebRTC = useCallback((event, details = {}, level = 'info') => {
+    if (isBotMatch) return;
+    const entry = { event, details };
+    console[level](`[spectral-front:webrtc] ${event}`, entry);
+    const ticket = session.current?.ticket;
+    if (ticket) fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket, event, details }) }).catch(() => {});
+  }, [isBotMatch]);
   const stop = useCallback(() => {
     clearTimeout(botTimer.current); botTickKey.current = null;
     clearInterval(simTimer.current); channel.current?.close(); peer.current?.close();
@@ -188,14 +210,30 @@ export default function GameClient({ matchId }) {
     const stored = JSON.parse(sessionStorage.getItem(sessionKey) || 'null'); if (!stored || stored.matchId !== matchId) { router.replace('/'); return; }
     session.current = stored;
     try {
-      const { iceServers } = await request(`/api/ice?ticket=${encodeURIComponent(stored.ticket)}`), pc = peer.current = new RTCPeerConnection({ iceServers });
-      pc.onicecandidate = event => event.candidate && request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'candidate', candidate: event.candidate } }) });
-      const reportDisconnect = () => { if (!isMatchOver(gameRef.current)) setProblem('Connection lost. The other commander or their network left the duel.'); };
-      pc.onconnectionstatechange = () => { if (['failed', 'disconnected'].includes(pc.connectionState)) reportDisconnect(); };
+      const { iceServers } = await request(`/api/ice?ticket=${encodeURIComponent(stored.ticket)}`);
+      const turnServerCount = iceServers.filter(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => String(url).startsWith('turn'))).length;
+      reportWebRTC('ice_servers_received', { iceServerCount: iceServers.length, turnServerCount });
+      const pc = peer.current = new RTCPeerConnection({ iceServers });
+      reportWebRTC('peer_created');
+      pc.onsignalingstatechange = () => reportWebRTC('signaling_state', { state: pc.signalingState });
+      pc.onicegatheringstatechange = () => reportWebRTC('ice_gathering_state', { state: pc.iceGatheringState });
+      pc.oniceconnectionstatechange = () => {
+        reportWebRTC('ice_connection_state', { state: pc.iceConnectionState }, ['failed', 'disconnected'].includes(pc.iceConnectionState) ? 'warn' : 'info');
+        if (['connected', 'completed'].includes(pc.iceConnectionState)) selectedCandidateDetails(pc).then(details => reportWebRTC('selected_candidate_pair', details)).catch(() => {});
+      };
+      pc.onicecandidateerror = event => reportWebRTC('ice_candidate_error', { code: event.errorCode, reason: event.errorText || 'ice-candidate-error' }, 'warn');
+      pc.onicecandidate = event => {
+        if (!event.candidate) { reportWebRTC('ice_gathering_complete'); return; }
+        reportWebRTC('ice_candidate', candidateDetails(event.candidate));
+        request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'candidate', candidate: event.candidate } }) }).catch(error => reportWebRTC('signal_send_error', { reason: error.message }, 'warn'));
+      };
+      const reportDisconnect = () => { reportWebRTC('peer_disconnected', { state: pc.connectionState }, 'warn'); if (!isMatchOver(gameRef.current)) setProblem('Connection lost. The other commander or their network left the duel.'); };
+      pc.onconnectionstatechange = () => { reportWebRTC('peer_connection_state', { state: pc.connectionState }, ['failed', 'disconnected'].includes(pc.connectionState) ? 'warn' : 'info'); if (['failed', 'disconnected'].includes(pc.connectionState)) reportDisconnect(); };
       const open = dataChannel => {
         channel.current = dataChannel;
-        dataChannel.onopen = () => { setLink('DIRECT LINK'); if (stored.role === 'host') { const initial = createMatch(); send({ type: 'state', state: initial }); publish(initial); } };
-        dataChannel.onclose = () => { if (!isMatchOver(gameRef.current)) setProblem('The other commander left the duel.'); };
+        dataChannel.onopen = () => { reportWebRTC('data_channel_open', { channel: dataChannel.label }); setLink('DIRECT LINK'); if (stored.role === 'host') { const initial = createMatch(); send({ type: 'state', state: initial }); publish(initial); } reportWebRTC('match_transport_ready', { channel: dataChannel.label }); };
+        dataChannel.onclose = () => { reportWebRTC('data_channel_close', { channel: dataChannel.label }, 'warn'); if (!isMatchOver(gameRef.current)) setProblem('The other commander left the duel.'); };
+        dataChannel.onerror = () => reportWebRTC('data_channel_error', { channel: dataChannel.label }, 'warn');
         dataChannel.onmessage = event => {
           const message = JSON.parse(event.data);
           if (message.type === 'state') {
@@ -205,13 +243,14 @@ export default function GameClient({ matchId }) {
           if (message.type === 'action' && stored.role === 'host') commitAction({ ...message.action, role: 'guest' });
         };
       };
-      pc.ondatachannel = event => open(event.channel);
-      if (stored.role === 'host') { open(pc.createDataChannel('match', { ordered: true })); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'offer', sdp: offer } }) }); }
+      pc.ondatachannel = event => { reportWebRTC('data_channel_received', { channel: event.channel.label }); open(event.channel); };
+      if (stored.role === 'host') { open(pc.createDataChannel('match', { ordered: true })); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'offer', sdp: offer } }) }); reportWebRTC('offer_sent'); }
       let cancelled = false;
-      (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { await pc.setRemoteDescription(message.sdp); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); } if (message.type === 'answer' && stored.role === 'host') await pc.setRemoteDescription(message.sdp); if (message.type === 'candidate') await pc.addIceCandidate(message.candidate).catch(() => {}); if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) setProblem('The other commander left the duel.'); } } catch {} await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
+      let lastSignalFailureAt = 0;
+      (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { reportWebRTC('offer_received'); await pc.setRemoteDescription(message.sdp); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); reportWebRTC('answer_sent'); } if (message.type === 'answer' && stored.role === 'host') { await pc.setRemoteDescription(message.sdp); reportWebRTC('answer_received'); } if (message.type === 'candidate') { reportWebRTC('remote_candidate_received', candidateDetails(message.candidate)); await pc.addIceCandidate(message.candidate).catch(error => reportWebRTC('remote_candidate_error', { reason: error.message }, 'warn')); } if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) { reportWebRTC('peer_disconnected', { reason: 'peer-left' }, 'warn'); setProblem('The other commander left the duel.'); } } } catch (error) { if (Date.now() - lastSignalFailureAt > 5000) { lastSignalFailureAt = Date.now(); reportWebRTC('signal_poll_error', { reason: error.message }, 'warn'); } } await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
       return () => { cancelled = true; };
-    } catch (error) { setProblem(error.message); }
-  }, [commitAction, isBotMatch, matchId, notifyEvents, publish, router, send]);
+    } catch (error) { reportWebRTC('peer_connection_error', { reason: error.message }, 'warn'); setProblem(error.message); }
+  }, [commitAction, isBotMatch, matchId, notifyEvents, publish, reportWebRTC, router, send]);
 
   useEffect(() => { let cleanup; connect().then(fn => cleanup = fn); return () => { cleanup?.(); stop(); }; }, [connect, stop]);
   useEffect(() => () => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); }, []);

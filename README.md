@@ -45,7 +45,15 @@ The WebRTC configuration always includes a public STUN server. When Metered TURN
    `METERED_TURN_REGION` is optional; omit it to use Metered’s configured default. Do not use a `NEXT_PUBLIC_` prefix for either secret.
 3. Redeploy the Vercel project. A matched player then requests `/api/ice`; that endpoint validates the match ticket before returning the Metered relay credentials to the browser.
 
-For local live-match testing, put the same values in `.env.local`. If Metered is not configured or temporarily unavailable, the app remains STUN-only rather than blocking a match.
+If you only have the dashboard’s static username/password and ICE array, this alternate configuration also works. Put the TURN URLs from Metered’s shown ICE array into one comma-separated value; do not include its STUN entry because the app already provides a STUN fallback.
+
+```bash
+METERED_TURN_URLS=turn:standard.relay.metered.ca:80,turn:standard.relay.metered.ca:80?transport=tcp,turn:standard.relay.metered.ca:443,turns:standard.relay.metered.ca:443?transport=tcp
+METERED_TURN_USERNAME=replace-with-a-rotated-username
+METERED_TURN_CREDENTIAL=replace-with-a-rotated-password
+```
+
+Use either the API-key configuration or this static-credential configuration—not both. The API-key path takes precedence when both exist. For local live-match testing, put the selected configuration in `.env.local`. If Metered is not configured or temporarily unavailable, the app remains STUN-only rather than blocking a match.
 
 ## Commands
 
@@ -142,8 +150,13 @@ The arena viewport has a fixed 5:3 aspect ratio. On ultrawide layouts it remains
 - [`app/api/join/route.js`](app/api/join/route.js) atomically pairs public-queue tickets and private-lobby codes in Redis. Private codes are six uppercase, unambiguous characters and expire after 10 minutes; public queue tickets expire after 90 seconds.
 - [`app/api/signal/route.js`](app/api/signal/route.js) relays short-lived WebRTC offer, answer, ICE candidate, and leave messages.
 - [`app/api/ice/route.js`](app/api/ice/route.js) returns the client ICE configuration for a matched ticket.
+- [`app/api/telemetry/route.js`](app/api/telemetry/route.js) accepts safe, matched-ticket WebRTC diagnostics from the browser and writes structured events to Vercel Function Logs. It records ICE/connection states and selected candidate type (`host`, `srflx`, or `relay`) but never logs tickets, SDP, raw candidates, or TURN credentials.
 
-The live-match host applies all actions, runs the simulation tick, and sends the complete resulting state after every action and tick. That state includes ship positions, energy, destroyed asteroids, ship damage, laser paths, and bloom events. This is appropriate for casual play; it is not designed for ranked, competitive, or economic use.
+The live-match host applies all actions, runs the simulation tick, and sends the complete resulting state after every action and tick. That state includes ship positions, energy, destroyed asteroids, ship damage, compact shot metadata, and bloom events. This is appropriate for casual play; it is not designed for ranked, competitive, or economic use.
+
+### WebRTC diagnostics
+
+Live matches emit verbose `[spectral-front:webrtc]` events in the browser console and forward safe summaries to Vercel. The definitive connection-route event is `selected_candidate_pair`: `relay` means TURN was used; `host` or `srflx` means the match connected directly. Inspect Vercel **Project → Logs** and filter for `spectral-front` or `/api/telemetry`. Do not log or share SDP, raw candidates, match tickets, or TURN credentials.
 
 ### Bot AI
 
