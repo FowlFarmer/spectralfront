@@ -3,14 +3,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD, beamDistanceForPower, mirrorWorldX, trace, worldDistanceToGraphUnits } from './game-model';
 
-export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', reverse = false, power = 100, previewDisabled = false }) {
+export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', reverse = false, power = 100, previewDisabled = false, enemyPing = null }) {
   const viewport = useRef(null), canvas = useRef(null);
   const eventStarts = useRef(new Map());
   const trailPaths = useRef(new Map());
   const displayAngles = useRef(new Map());
+  const pingStart = useRef(null);
+  const pingId = useRef(null);
   const lastFrameTime = useRef(performance.now());
   const [now, setNow] = useState(() => performance.now()), [cursor, setCursor] = useState(null), [waypointHovered, setWaypointHovered] = useState(false);
   const mirrored = role === 'guest';
+  const foeRole = role === 'host' ? 'guest' : 'host';
+
+  useEffect(() => {
+    if (!enemyPing) return;
+    if (pingId.current !== enemyPing.id) {
+      pingId.current = enemyPing.id;
+      pingStart.current = performance.now();
+    }
+  }, [enemyPing]);
 
   const eventAge = event => {
     let start = eventStarts.current.get(event.id);
@@ -69,9 +80,18 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
         drawShip(ctx, ship, shipRole, displayAngle, game.cosmetics?.[shipRole]?.ship);
       }
     }
+    if (enemyPing && pingStart.current !== null) {
+      const pingShip = game.ships[foeRole]?.[enemyPing.shipIndex];
+      if (pingShip?.hp) {
+        const pingAge = frameTime - pingStart.current;
+        if (pingAge < RADAR_PING_TOTAL_MS) {
+          drawRadarPing(ctx, pingShip.x, pingShip.y, pingAge, game.cosmetics?.[foeRole]?.ship || game.cosmetics?.[foeRole]?.color || '#f27b82');
+        }
+      }
+    }
     if (cursor) drawCursorReadout(ctx, cursor, origin, bounds, mirrored);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }, [cursor, expression, game, mirrored, now, power, previewDisabled, reverse, role, selected, waypointHovered]);
+  }, [cursor, enemyPing, expression, foeRole, game, mirrored, now, power, previewDisabled, reverse, role, selected, waypointHovered]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => { const element = viewport.current; if (!element) return; const observer = new ResizeObserver(draw); observer.observe(element); return () => observer.disconnect(); }, [draw]);
@@ -90,7 +110,8 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
       const start = eventStarts.current.get(bloom.id);
       return start !== undefined && time - start < flightTime + BLOOM_DURATION;
     });
-    const needsAnimation = time => hasActiveEvent(time) || shipsNeedRotationTick(game, displayAngles.current);
+    const pingActive = time => enemyPing && pingStart.current !== null && time - pingStart.current < RADAR_PING_TOTAL_MS;
+    const needsAnimation = time => hasActiveEvent(time) || shipsNeedRotationTick(game, displayAngles.current) || pingActive(time);
     if (!needsAnimation(startedAt)) return;
     let frame;
     const tick = () => {
@@ -100,7 +121,7 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [game, game?.trails, game?.blooms, game?.ships, mirrored]);
+  }, [enemyPing, game, game?.trails, game?.blooms, game?.ships, mirrored]);
 
   const handleClick = event => {
     const point = pointerToWorld(event, canvas.current, mirrored);
@@ -121,7 +142,40 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
 
 const FLIGHT_TIME = SHOT_FLIGHT_MS, BLOOM_DURATION = 5200, TRAIL_FADE_TIME = 4200;
 const SHIP_TURN_RATE = 3.4;
+const RADAR_PING_DURATION_MS = 1400;
+const RADAR_PING_RING_DELAY_MS = 220;
+const RADAR_PING_RING_COUNT = 3;
+const RADAR_PING_MAX_RADIUS = 48;
+const RADAR_PING_TOTAL_MS = RADAR_PING_DURATION_MS + RADAR_PING_RING_DELAY_MS * (RADAR_PING_RING_COUNT - 1);
 const PREVIEW_MIN_GRAPH_UNITS = 1, PREVIEW_MAX_GRAPH_UNITS = 4;
+
+function drawRadarPing(ctx, x, y, age, color) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (let ring = 0; ring < RADAR_PING_RING_COUNT; ring += 1) {
+    const ringAge = age - ring * RADAR_PING_RING_DELAY_MS;
+    if (ringAge < 0 || ringAge > RADAR_PING_DURATION_MS) continue;
+    const progress = ringAge / RADAR_PING_DURATION_MS;
+    const radius = SHIP_RADIUS + 6 + progress * RADAR_PING_MAX_RADIUS;
+    const alpha = (1 - progress) * 0.82;
+    ctx.strokeStyle = colorWithAlpha(color, alpha);
+    ctx.lineWidth = Math.max(0.35, 1.05 - progress * 0.55);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function colorWithAlpha(color, alpha) {
+  if (color.startsWith('#') && color.length === 7) {
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return color;
+}
 
 function previewPathLength(power) {
   const normalizedPower = (Math.max(5, Math.min(100, power)) - 5) / 95;

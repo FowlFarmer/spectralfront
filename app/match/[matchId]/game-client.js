@@ -167,6 +167,7 @@ export default function GameClient({ matchId }) {
   const [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x');
   const [formulaParams, setFormulaParams] = useState({});
   const [power, setPower] = useState(75), [reverseFire, setReverseFire] = useState(false), [notices, setNotices] = useState([]), [arcHistory, setArcHistory] = useState([]);
+  const [enemyPing, setEnemyPing] = useState(null);
 
   const publish = useCallback(next => { gameRef.current = next; setGame(next); }, []);
   const send = useCallback(message => { if (channel.current?.readyState === 'open') channel.current.send(JSON.stringify(message)); }, []);
@@ -387,6 +388,11 @@ export default function GameClient({ matchId }) {
   useEffect(() => { let cleanup; connect().then(fn => cleanup = fn); return () => { cleanup?.(); stop(); }; }, [connect, stop]);
   useEffect(() => () => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); }, []);
   useEffect(() => {
+    if (!enemyPing) return;
+    const timer = window.setTimeout(() => setEnemyPing(current => (current?.id === enemyPing.id ? null : current)), 1840);
+    return () => clearTimeout(timer);
+  }, [enemyPing]);
+  useEffect(() => {
     const field = formulaField.current;
     if (!field) return;
     field.style.height = '0px';
@@ -409,6 +415,11 @@ export default function GameClient({ matchId }) {
     if (myEnergy < fireCost) { pushNotice('notEnoughEnergyFire'); return; }
     submitAction({ type: 'fire', role: me, shipIndex: selected, expression: materializeFormulaParams(formula, formulaParams), power, reverse: reverseFire });
   };
+  const pingEnemyShip = index => {
+    const ship = game.ships[foe][index];
+    if (!ship?.hp) return;
+    setEnemyPing({ shipIndex: index, id: Date.now() });
+  };
 
   return (
     <div className="game-shell" style={{ '--player-ui': myColor, '--player-laser': myColor, '--player-ship': myColor }}>
@@ -418,13 +429,13 @@ export default function GameClient({ matchId }) {
           <div className="fleet-command player active" style={{ '--fleet-ship': myColor }}><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · FIRE OR LEFT CLICK TO MOVE'}</small>
             <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} aria-label={`Select ship ${index + 1}. Energy ${Math.round(ship.energy)} of ${ENERGY_MAX}. ${ship.hp ? (ship.moving ? 'Moving' : 'Ready') : 'Lost'}`} onClick={() => setSelected(index)}><span className="ship-choice-head"><b>SHIP {String(index + 1).padStart(2, '0')}</b><i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></span><span className="ship-energy" aria-hidden="true"><span className="ship-energy-fill" style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /><em>{Math.round(ship.energy)}<i> / {ENERGY_MAX}</i></em></span></button>)}</div>
           </div>
-          <div className="player enemy" style={{ '--enemy-ship': foeColor }}><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'ENERGY RESERVES' : 'ENERGY RESERVES'}</small><div className="enemy-ship-list">{game.ships[foe].map((ship, index) => <div className={'enemy-ship ' + (!ship.hp ? 'lost' : '')} key={index}><b>SHIP {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-label={`Enemy ship ${index + 1} energy ${Math.round(ship.energy)} of ${ENERGY_MAX}`}><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? Math.round(ship.energy) : 'LOST'}</span></div>)}</div></div>
+          <div className="player enemy" style={{ '--enemy-ship': foeColor }}><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : 'ENERGY RESERVES · CLICK TO LOCATE'}</small><div className="enemy-ship-list">{game.ships[foe].map((ship, index) => <button type="button" key={index} disabled={!ship.hp} className={'enemy-ship' + (!ship.hp ? ' lost' : '') + (enemyPing?.shipIndex === index ? ' pinging' : '')} aria-label={ship.hp ? `Locate enemy ship ${index + 1} on the battlefield` : `Enemy ship ${index + 1} lost`} onClick={() => pingEnemyShip(index)}><b>SHIP {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-hidden="true"><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? Math.round(ship.energy) : 'LOST'}</span></button>)}</div></div>
           <CosmeticControls cosmetics={myCosmetics} onChange={submitCosmetic} />
         </aside>
         <section className="panel arena-wrap">
           <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : combatActive ? `LIVE · ${Math.round((game.simTime || 0) / 1000)}s` : 'STAGING SEQUENCE'}</span></div>
           <div className="arena-stage">
-            <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={combatLocked} expression={materializeFormulaParams(formula, formulaParams)} reverse={reverseFire} power={power} previewDisabled={combatLocked || !combatActive} />
+            <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={combatLocked} expression={materializeFormulaParams(formula, formulaParams)} reverse={reverseFire} power={power} previewDisabled={combatLocked || !combatActive} enemyPing={enemyPing} />
             <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
             {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
           </div>
