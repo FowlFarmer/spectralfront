@@ -77,7 +77,7 @@ async function candidatePairSummary(pc) {
   }).join(', ') || 'no-candidate-pairs';
 }
 
-const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g, CONSTANT_SLIDER_LIMIT = 100, CONSTANT_SLIDER_SPAN = 1000, FORMULA_FIELD_MIN_HEIGHT = 60;
+const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g, CONSTANT_SLIDER_LIMIT = 100, CONSTANT_SLIDER_SPAN = 1000, CONSTANT_SLIDER_COARSE_STEP = 25, POWER_HOTKEY_STEP = 5, FORMULA_FIELD_MIN_HEIGHT = 60;
 const alphaTokenNames = ['sqrt', 'sin', 'cos', 'tan', 'abs', 'log', 'exp', 'ln', 'pi'];
 function numericLiterals(expression) {
   return Array.from(expression.matchAll(numericLiteralPattern), match => {
@@ -411,12 +411,28 @@ export default function GameClient({ matchId }) {
   useEffect(() => {
     const handleCombatHotkey = event => {
       const key = event.key.toLowerCase();
-      if (!['f', 'r'].includes(key) || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (!['f', 'r', 'y', 'w', 's', '1', '2', '3', '4', '5', '6', '7', '8'].includes(key) || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target, tag = target?.tagName?.toLowerCase();
-      if (target?.isContentEditable || tag === 'textarea' || tag === 'input' || tag === 'select') return;
+      const formulaFocused = target === formulaField.current;
+      const textEditingTarget = target?.isContentEditable || tag === 'textarea' || tag === 'select' || (tag === 'input' && target.type !== 'range');
+      if (textEditingTarget && !(key === 'y' && formulaFocused)) return;
       event.preventDefault();
       if (key === 'f') fireCurrent();
-      else if (!isCombatLocked(gameRef.current)) setReverseFire(value => !value);
+      else if (key === 'r' && !isCombatLocked(gameRef.current)) setReverseFire(value => !value);
+      else if (key === 'w') setPower(value => Math.min(100, value + POWER_HOTKEY_STEP));
+      else if (key === 's') setPower(value => Math.max(5, value - POWER_HOTKEY_STEP));
+      else if (key === 'y') {
+        if (formulaFocused) formulaField.current?.blur();
+        else formulaField.current?.focus();
+      }
+      else if (['1', '2', '3', '4'].includes(key)) {
+        const index = Number(key) - 1, me = session.current?.role;
+        if (gameRef.current?.ships[me]?.[index]?.hp) setSelected(index);
+      }
+      else if (['5', '6', '7', '8'].includes(key)) {
+        const index = Number(key) - 5, me = session.current?.role, foe = me === 'host' ? 'guest' : 'host';
+        if (gameRef.current?.ships[foe]?.[index]?.hp) setEnemyPing({ shipIndex: index, id: Date.now() });
+      }
     };
     window.addEventListener('keydown', handleCombatHotkey);
     return () => window.removeEventListener('keydown', handleCombatHotkey);
@@ -440,7 +456,7 @@ export default function GameClient({ matchId }) {
 
   return (
     <div className="game-shell" style={{ '--player-ui': myColor, '--player-laser': myColor, '--player-ship': myColor }}>
-      <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><button className="leave" onClick={leave}>LEAVE MATCH</button></header>
+      <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><div className="top-actions"><HotkeyHelp /><button className="leave" onClick={leave}>LEAVE MATCH</button></div></header>
       <main className="game-grid">
         <aside className="panel side">
           <div className="fleet-command player active" style={{ '--fleet-ship': myColor }}><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · FIRE OR LEFT CLICK TO MOVE'}</small>
@@ -475,7 +491,7 @@ export default function GameClient({ matchId }) {
             </div>
             <button type="button" className={'reverse-fire ' + (reverseFire ? 'active' : '')} disabled={combatLocked} onClick={() => setReverseFire(value => !value)}><span>FIRE DIRECTION (R)</span><b>{reverseFire ? 'REVERSE' : 'FORWARD'}</b></button>
             <div className="hint">{matchOver ? 'Command channel closed.' : !combatActive ? `Unlocks in ${countdownSeconds}s.` : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship · +x points enemyward.'}</div>
-            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : !combatActive ? 'SYSTEMS ARMING' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM (R)'}</button>
+            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : !combatActive ? 'SYSTEMS ARMING' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM (F)'}</button>
           </div>
         </aside>
       </main>
@@ -503,21 +519,23 @@ function FunctionConstantSliders({ formula, params, disabled, onNumberChange, on
     if (highlight) pulseHighlight(key);
   }, [pulseHighlight]);
   const handleSliderKey = useCallback(event => {
-    if (disabled || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || !activeControl) return;
+    const key = event.key.toLowerCase();
+    if (disabled || !['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'a', 'd'].includes(key) || !activeControl) return;
     event.preventDefault();
     event.stopPropagation?.();
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-      const nextIndex = Math.max(0, Math.min(controls.length - 1, activeIndex + (event.key === 'ArrowUp' ? -1 : 1)));
+    if (key === 'arrowup' || key === 'arrowdown') {
+      const nextIndex = Math.max(0, Math.min(controls.length - 1, activeIndex + (key === 'arrowup' ? -1 : 1)));
       claimSlider(controls[nextIndex].key, true);
       return;
     }
-    const nextPosition = sliderPositionStep(constantToSliderPosition(activeControl.value), event.key === 'ArrowLeft' ? -1 : 1);
+    const delta = key === 'arrowleft' ? -1 : key === 'arrowright' ? 1 : key === 'a' ? -CONSTANT_SLIDER_COARSE_STEP : CONSTANT_SLIDER_COARSE_STEP;
+    const nextPosition = sliderPositionStep(constantToSliderPosition(activeControl.value), delta);
     claimSlider(activeControl.key, true);
     activeControl.apply(sliderPositionToConstant(nextPosition));
   }, [activeControl, activeIndex, claimSlider, controls, disabled]);
   useEffect(() => {
     const handleWindowKeyDown = event => {
-      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', 'd', 'D'].includes(event.key)) return;
       const target = event.target, tag = target?.tagName?.toLowerCase();
       if (target?.isContentEditable || tag === 'textarea' || (tag === 'input' && target.type !== 'range')) return;
       if (tag === 'input' && target.type === 'range' && !target.closest?.('.constant-tuners')) return;
@@ -528,7 +546,7 @@ function FunctionConstantSliders({ formula, params, disabled, onNumberChange, on
   }, [handleSliderKey]);
   useEffect(() => () => clearTimeout(highlightTimer.current), []);
   if (!constants.length && !symbols.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add numbers or letters like a, b, c to tune them with sliders.</p></section>;
-  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>Arrow keys for fine tuning</small></div><div className="constant-slider-list">{controls.map(control => <label className={'constant-slider ' + (control.symbol ? 'symbol-slider ' : '') + (control.key === (activeControl?.key) ? 'active-tuner ' : '') + (control.key === highlightedSliderKey ? 'keyboard-highlight ' : '')} key={control.key}><b>{control.label}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(control.value)} disabled={disabled} onFocus={() => claimSlider(control.key)} onPointerDown={() => claimSlider(control.key)} onChange={event => { claimSlider(control.key); control.apply(sliderPositionToConstant(Number(event.target.value))); }} /><output>{formatConstant(control.value)}</output></label>)}</div></section>;
+  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small></small></div><div className="constant-slider-list">{controls.map(control => <label className={'constant-slider ' + (control.symbol ? 'symbol-slider ' : '') + (control.key === (activeControl?.key) ? 'active-tuner ' : '') + (control.key === highlightedSliderKey ? 'keyboard-highlight ' : '')} key={control.key}><b>{control.label}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(control.value)} disabled={disabled} onFocus={() => claimSlider(control.key)} onPointerDown={() => claimSlider(control.key)} onChange={event => { claimSlider(control.key); control.apply(sliderPositionToConstant(Number(event.target.value))); }} /><output>{formatConstant(control.value)}</output></label>)}</div></section>;
 }
 
 function CosmeticControls({ cosmetics, onChange }) {
@@ -539,6 +557,10 @@ function CosmeticControls({ cosmetics, onChange }) {
 function ColorRow({ label, value, options, onChange }) {
   const name = label || 'Commander';
   return <div className="color-row">{label && <span>{label}</span>}<div>{options.map((color, index) => <button key={color} type="button" aria-label={`${name} color option ${index + 1}`} className={color === value ? 'selected' : ''} style={{ '--swatch': color }} onClick={() => onChange(color)}><i /><b>{String(index + 1).padStart(2, '0')}</b></button>)}</div></div>;
+}
+
+function HotkeyHelp() {
+  return <div className="hotkey-help" tabIndex={0} role="button" aria-label="Show hotkeys"><span>&lt; Hotkeys &gt;</span><div className="hotkey-popover" role="tooltip"><dl><div><dt>F</dt><dd>Fire beam</dd></div><div><dt>R</dt><dd>Reverse fire direction</dd></div><div><dt>Y</dt><dd>Toggle formula typing</dd></div><div><dt>W / S</dt><dd>Adjust beam power</dd></div><div><dt>1–4</dt><dd>Select ship</dd></div><div><dt>5–8</dt><dd>Locate enemy ship</dd></div><div><dt>A / D</dt><dd>Coarse-tune active slider</dd></div><div><dt>← / →</dt><dd>Fine-tune active slider</dd></div><div><dt>↑ / ↓</dt><dd>Select slider</dd></div></dl></div></div>;
 }
 
 function LaunchCountdown({ seconds }) {
