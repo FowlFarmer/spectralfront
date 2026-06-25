@@ -77,23 +77,26 @@ async function candidatePairSummary(pc) {
   }).join(', ') || 'no-candidate-pairs';
 }
 
-const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g;
+const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g, CONSTANT_SLIDER_LIMIT = 100, CONSTANT_SLIDER_SPAN = 1000;
 function numericLiterals(expression) {
-  return Array.from(expression.matchAll(numericLiteralPattern), match => ({ value: Number(match[0]), start: match.index, end: match.index + match[0].length }));
+  return Array.from(expression.matchAll(numericLiteralPattern), match => ({ value: Number(match[0]), start: match.index, end: match.index + match[0].length }))
+    .filter(literal => literal.value <= CONSTANT_SLIDER_LIMIT);
 }
-function sliderBounds(value) {
-  const limit = Math.max(1, Math.abs(value) * 4);
-  return { min: -limit, max: limit, step: limit <= 2 ? 0.01 : limit <= 10 ? 0.05 : 0.25 };
+function constantToSliderPosition(value) {
+  return Math.round(Math.sqrt(Math.min(CONSTANT_SLIDER_LIMIT, Math.max(0, value)) / CONSTANT_SLIDER_LIMIT) * CONSTANT_SLIDER_SPAN);
 }
-function formatConstant(value, step) {
-  const decimals = step <= 0.01 ? 2 : step <= 0.05 ? 2 : step <= 0.25 ? 2 : 1;
+function sliderPositionToConstant(position) {
+  const normalized = Math.max(0, Math.min(CONSTANT_SLIDER_SPAN, position)) / CONSTANT_SLIDER_SPAN;
+  return normalized ** 2 * CONSTANT_SLIDER_LIMIT;
+}
+function formatConstant(value) {
+  const decimals = Math.abs(value) < 10 ? 2 : Math.abs(value) < 50 ? 1 : 0;
   return String(Number(value.toFixed(decimals)));
 }
 function replaceNumericLiteral(expression, index, value) {
   const literal = numericLiterals(expression)[index];
   if (!literal) return expression;
-  const { step } = sliderBounds(literal.value);
-  return `${expression.slice(0, literal.start)}${formatConstant(value, step)}${expression.slice(literal.end)}`;
+  return `${expression.slice(0, literal.start)}${formatConstant(value)}${expression.slice(literal.end)}`;
 }
 
 export default function GameClient({ matchId }) {
@@ -367,8 +370,8 @@ export default function GameClient({ matchId }) {
 
 function FunctionConstantSliders({ formula, disabled, onChange }) {
   const constants = numericLiterals(formula);
-  if (!constants.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add a numeric value to tune it with a slider.</p></section>;
-  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>LIVE TUNE</small></div><div className="constant-slider-list">{constants.map((constant, index) => { const bounds = sliderBounds(constant.value); return <label className="constant-slider" key={`${constant.start}-${index}`}><b>C{String(index + 1).padStart(2, '0')}</b><input type="range" min={bounds.min} max={bounds.max} step={bounds.step} value={constant.value} disabled={disabled} onChange={event => onChange(index, Number(event.target.value))} /><output>{formatConstant(constant.value, bounds.step)}</output></label>; })}</div></section>;
+  if (!constants.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add a number from 0 to 100 to tune it with a slider.</p></section>;
+  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>0 ⇄ 100 · FINE LOW END</small></div><div className="constant-slider-list">{constants.map((constant, index) => <label className="constant-slider" key={`${constant.start}-${index}`}><b>C{String(index + 1).padStart(2, '0')}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(constant.value)} disabled={disabled} onChange={event => onChange(index, sliderPositionToConstant(Number(event.target.value)))} /><output>{formatConstant(constant.value)}</output></label>)}</div></section>;
 }
 
 function LaunchCountdown({ seconds }) {
