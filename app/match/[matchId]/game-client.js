@@ -140,6 +140,7 @@ function sliderPositionToConstant(position) {
   if (normalized <= 0.75) return (normalized - 0.5) / 0.25;
   return 1 + ((normalized - 0.75) / 0.25) ** 2 * (CONSTANT_SLIDER_LIMIT - 1);
 }
+const sliderPositionStep = (position, delta) => Math.max(0, Math.min(CONSTANT_SLIDER_SPAN, position + delta));
 function formatConstant(value) {
   const decimals = Math.abs(value) < 2 ? 2 : Math.abs(value) < 10 ? 2 : Math.abs(value) < 50 ? 1 : 0;
   return String(Number(value.toFixed(decimals)));
@@ -467,9 +468,39 @@ export default function GameClient({ matchId }) {
 }
 
 function FunctionConstantSliders({ formula, params, disabled, onNumberChange, onParamChange }) {
+  const [activeSliderKey, setActiveSliderKey] = useState(null), [highlightedSliderKey, setHighlightedSliderKey] = useState(null);
+  const highlightTimer = useRef(null);
   const constants = numericLiterals(formula), symbols = parameterSymbols(formula);
+  const controls = [
+    ...symbols.map(symbol => ({ key: `symbol-${symbol}`, label: symbol, value: Number.isFinite(params[symbol]) ? params[symbol] : 1, apply: value => onParamChange(symbol, value), symbol: true })),
+    ...constants.map((constant, index) => ({ key: `constant-${constant.start}-${index}`, label: `C${String(index + 1).padStart(2, '0')}`, value: constant.value, apply: value => onNumberChange(index, value), index })),
+  ];
+  const activeIndex = Math.max(0, controls.findIndex(control => control.key === activeSliderKey));
+  const activeControl = controls[activeIndex];
+  const pulseHighlight = useCallback(key => {
+    clearTimeout(highlightTimer.current);
+    setHighlightedSliderKey(key);
+    highlightTimer.current = setTimeout(() => setHighlightedSliderKey(null), 4000);
+  }, []);
+  const claimSlider = useCallback((key, highlight = false) => {
+    setActiveSliderKey(key);
+    if (highlight) pulseHighlight(key);
+  }, [pulseHighlight]);
+  const handleSliderKey = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || !activeControl) return;
+    event.preventDefault();
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      const nextIndex = Math.max(0, Math.min(controls.length - 1, activeIndex + (event.key === 'ArrowUp' ? -1 : 1)));
+      claimSlider(controls[nextIndex].key, true);
+      return;
+    }
+    const nextPosition = sliderPositionStep(constantToSliderPosition(activeControl.value), event.key === 'ArrowLeft' ? -1 : 1);
+    claimSlider(activeControl.key, true);
+    activeControl.apply(sliderPositionToConstant(nextPosition));
+  };
+  useEffect(() => () => clearTimeout(highlightTimer.current), []);
   if (!constants.length && !symbols.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add numbers or letters like a, b, c to tune them with sliders.</p></section>;
-  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>-100 ⇄ 100 · CENTER ZERO</small></div><div className="constant-slider-list">{symbols.map(symbol => { const value = Number.isFinite(params[symbol]) ? params[symbol] : 1; return <label className="constant-slider symbol-slider" key={`symbol-${symbol}`}><b>{symbol}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(value)} disabled={disabled} onChange={event => onParamChange(symbol, sliderPositionToConstant(Number(event.target.value)))} /><output>{formatConstant(value)}</output></label>; })}{constants.map((constant, index) => <label className="constant-slider" key={`${constant.start}-${index}`}><b>C{String(index + 1).padStart(2, '0')}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(constant.value)} disabled={disabled} onChange={event => onNumberChange(index, sliderPositionToConstant(Number(event.target.value)))} /><output>{formatConstant(constant.value)}</output></label>)}</div></section>;
+  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>Arrow keys for fine tuning</small></div><div className="constant-slider-list">{controls.map(control => <label className={'constant-slider ' + (control.symbol ? 'symbol-slider ' : '') + (control.key === (activeControl?.key) ? 'active-tuner ' : '') + (control.key === highlightedSliderKey ? 'keyboard-highlight ' : '')} key={control.key}><b>{control.label}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(control.value)} disabled={disabled} onFocus={() => claimSlider(control.key)} onPointerDown={() => claimSlider(control.key)} onKeyDown={handleSliderKey} onChange={event => { claimSlider(control.key); control.apply(sliderPositionToConstant(Number(event.target.value))); }} /><output>{formatConstant(control.value)}</output></label>)}</div></section>;
 }
 
 function CosmeticControls({ cosmetics, onChange }) {
