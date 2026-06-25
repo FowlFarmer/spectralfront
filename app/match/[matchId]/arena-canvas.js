@@ -214,11 +214,6 @@ function drawTrajectoryPreview(ctx, expression, ship, shipRole, power, reverse, 
   ctx.beginPath();
   preview.forEach((point, index) => (index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)));
   ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(preview.at(-1).x, preview.at(-1).y, 1.6, 0, Math.PI * 2);
-  ctx.fill();
   ctx.restore();
 }
 
