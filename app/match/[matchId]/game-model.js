@@ -301,8 +301,9 @@ function applyFire(game, action) {
     if (planet) { impact = { kind: 'planet', x: point.x, y: point.y, seed: planet.seed }; break; }
     const moon = next.planets.flatMap(planet => planet.moonBodies || []).find(candidate => Math.hypot(point.x - candidate.x, point.y - candidate.y) < candidate.r);
     if (moon) { impact = { kind: 'moon', x: point.x, y: point.y, seed: moon.seed, moonId: moon.id }; break; }
-    const targetIndex = next.ships[ROLES[role]].findIndex(ship => ship.hp && Math.hypot(point.x - ship.x, point.y - ship.y) < SHIP_RADIUS);
-    if (targetIndex >= 0) { impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1, shipRole: ROLES[role], shipIndex: targetIndex }; break; }
+    const shipImpact = ['host', 'guest'].flatMap(shipRole => next.ships[shipRole].map((target, targetIndex) => ({ shipRole, target, targetIndex })))
+      .find(candidate => candidate.target.hp && !(candidate.shipRole === role && candidate.targetIndex === shipIndex) && Math.hypot(point.x - candidate.target.x, point.y - candidate.target.y) < SHIP_RADIUS);
+    if (shipImpact) { impact = { kind: 'ship', x: point.x, y: point.y, seed: (game.shotNumber || 0) + 1, shipRole: shipImpact.shipRole, shipIndex: shipImpact.targetIndex }; break; }
   }
   const pathLength = measurePathLength(resolvedPath);
   const stopReason = impact ? 'impact' : classifyPathStop(pathLength, maxDistance);

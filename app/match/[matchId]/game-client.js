@@ -26,6 +26,7 @@ const request = async (path, options = {}) => { const response = await fetch(pat
 const notificationKeyForFireResult = (result, shooterRole, viewerRole) => {
   if (result.unstable) return shooterRole === viewerRole ? 'unstableFunction' : null;
   if (result.hit && result.impact?.kind === 'ship') {
+    if (result.impact.shipRole === shooterRole && shooterRole === viewerRole) return 'selfShipDestroyed';
     if (shooterRole === viewerRole) return 'enemyShipDestroyed';
     if (result.impact.shipRole === viewerRole) return 'friendlyShipLost';
     return null;

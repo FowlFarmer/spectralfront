@@ -14,6 +14,7 @@ export const ARENA_NOTIFICATIONS = Object.freeze({
   notEnoughEnergyFire: { enabled: true, message: 'Not enough energy to fire at this power.', accent: '#e7bd61' },
   outOfEnergyMoving: { enabled: true, message: 'Energy depleted — ship braking to a stop.', accent: '#e7bd61' },
   enemyShipDestroyed: { enabled: true, message: 'Enemy ship destroyed.', accent: '#55e6a8' },
+  selfShipDestroyed: { enabled: true, message: 'Friendly fire — you destroyed your own ship.', accent: '#ff9d66' },
   friendlyShipLost: { enabled: true, message: 'Direct hit. One of your ships lost.', accent: '#ff6b6b' },
   asteroidDestroyed: { enabled: true, message: 'Asteroid vaporized.', accent: '#aab5bb' },
   moonImpact: { enabled: true, message: 'Moon impact. Arc stopped.', accent: '#c9d5dc' },
