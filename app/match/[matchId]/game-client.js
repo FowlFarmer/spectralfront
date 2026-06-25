@@ -77,6 +77,25 @@ async function candidatePairSummary(pc) {
   }).join(', ') || 'no-candidate-pairs';
 }
 
+const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g;
+function numericLiterals(expression) {
+  return Array.from(expression.matchAll(numericLiteralPattern), match => ({ value: Number(match[0]), start: match.index, end: match.index + match[0].length }));
+}
+function sliderBounds(value) {
+  const limit = Math.max(1, Math.abs(value) * 4);
+  return { min: -limit, max: limit, step: limit <= 2 ? 0.01 : limit <= 10 ? 0.05 : 0.25 };
+}
+function formatConstant(value, step) {
+  const decimals = step <= 0.01 ? 2 : step <= 0.05 ? 2 : step <= 0.25 ? 2 : 1;
+  return String(Number(value.toFixed(decimals)));
+}
+function replaceNumericLiteral(expression, index, value) {
+  const literal = numericLiterals(expression)[index];
+  if (!literal) return expression;
+  const { step } = sliderBounds(literal.value);
+  return `${expression.slice(0, literal.start)}${formatConstant(value, step)}${expression.slice(literal.end)}`;
+}
+
 export default function GameClient({ matchId }) {
   const router = useRouter(), isBotMatch = matchId.startsWith('bot-');
   const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
@@ -330,6 +349,7 @@ export default function GameClient({ matchId }) {
             <div className="formula">
               <label>FIRING ARC — Y = F(X)</label>
               <div className="formula-row"><span>y =</span><input value={formula} disabled={combatLocked} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
+              <FunctionConstantSliders formula={formula} disabled={combatLocked} onChange={(index, value) => setFormula(current => replaceNumericLiteral(current, index, value))} />
               <div className="power-control">
                 <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange} graph units · {Math.round(fireCost)} energy</label>
                 <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={combatLocked} onChange={event => setPower(+event.target.value)} />
@@ -345,8 +365,14 @@ export default function GameClient({ matchId }) {
   );
 }
 
+function FunctionConstantSliders({ formula, disabled, onChange }) {
+  const constants = numericLiterals(formula);
+  if (!constants.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add a numeric value to tune it with a slider.</p></section>;
+  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>LIVE TUNE</small></div><div className="constant-slider-list">{constants.map((constant, index) => { const bounds = sliderBounds(constant.value); return <label className="constant-slider" key={`${constant.start}-${index}`}><b>C{String(index + 1).padStart(2, '0')}</b><input type="range" min={bounds.min} max={bounds.max} step={bounds.step} value={constant.value} disabled={disabled} onChange={event => onChange(index, Number(event.target.value))} /><output>{formatConstant(constant.value, bounds.step)}</output></label>; })}</div></section>;
+}
+
 function LaunchCountdown({ seconds }) {
-  return <section className="launch-countdown" aria-live="polite"><div className="launch-kicker">ENGAGEMENT WINDOW</div><output>{seconds}</output><p>Fleet synchronized · energy reserves empty</p></section>;
+  return <section className="launch-countdown" aria-live="polite"><div className="launch-kicker">ENGAGEMENT WINDOW</div><output>{seconds}</output><p>Fleet synchronized · opening reserves randomized</p></section>;
 }
 
 function MatchConclusion({ won, isBotMatch, myRemaining, foeRemaining, onRestart, onLeave }) {

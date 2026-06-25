@@ -19,6 +19,7 @@ export const MATCH_COUNTDOWN_MS = 5_000;
 export const MATCH_OUTCOME_DELAY_MS = 2_000;
 export const BOT_OPENING_SHOT_DELAY_MS = 10_000;
 export const BOT_SHOT_COOLDOWN_MS = 5_000;
+export const BOT_MOVE_START_ENERGY = 40;
 
 const ROLES = Object.freeze({ host: 'guest', guest: 'host' });
 export const PLANET_TYPES = Object.freeze(['moon', 'mercurian', 'lava', 'plutoid', 'marslike', 'desert', 'venuslike', 'earthlike', 'ocean', 'ice', 'superEarth', 'miniNeptune', 'neptune', 'uranian', 'gasGiant', 'saturnian']);
@@ -44,16 +45,17 @@ export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { bot
   return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), trails: [], blooms: [], ships, planets, asteroids };
 };
 
-function createShip(x, y, role) {
-  return { x, y, hp: 1, energy: 0, angle: role === 'host' ? 0 : Math.PI, vx: 0, vy: 0, waypoint: null, moving: false, braking: false };
+function createShip(x, y, role, energy = 0) {
+  return { x, y, hp: 1, energy, angle: role === 'host' ? 0 : Math.PI, vx: 0, vy: 0, waypoint: null, moving: false, braking: false };
 }
 
 function createFleets(random) {
   const margin = SHIP_RADIUS * 3, minimumSeparation = SHIP_RADIUS * 9;
+  const startingEnergy = Array.from({ length: 4 }, () => Math.round(between(random, 0, SHIP_ENERGY_MAX)));
   const fleet = side => {
     const ships = [], minX = side === 'host' ? margin : WORLD.width * (2 / 3) + margin, maxX = side === 'host' ? WORLD.width / 3 - margin : WORLD.width - margin;
     for (let attempt = 0; ships.length < 4 && attempt < 700; attempt += 1) {
-      const candidate = createShip(Math.round(between(random, minX, maxX)), Math.round(between(random, margin, WORLD.height - margin)), side);
+      const candidate = createShip(Math.round(between(random, minX, maxX)), Math.round(between(random, margin, WORLD.height - margin)), side, startingEnergy[ships.length]);
       if (ships.every(ship => Math.hypot(candidate.x - ship.x, candidate.y - ship.y) >= minimumSeparation)) ships.push(candidate);
     }
     if (ships.length !== 4) throw Error('Unable to place fleet.');
@@ -356,7 +358,7 @@ export function createBotAction(game) {
   if (movingShip) return null;
 
   if ((game.botShotsSinceRoam || 0) >= (game.botRoamAfter || 3)) {
-    const readyRovers = shooters.filter(({ ship }) => ship.energy >= SHIP_ENERGY_MAX);
+    const readyRovers = shooters.filter(({ ship }) => canBotStartMove(ship));
     if (!readyRovers.length) return null;
     const rover = readyRovers[Math.floor(Math.random() * readyRovers.length)];
     const waypoint = findRandomWaypoint(game, rover.ship);
@@ -365,21 +367,31 @@ export function createBotAction(game) {
 
   const combatTime = Math.max(0, game.simTime - (game.countdownMs ?? MATCH_COUNTDOWN_MS));
   const canFire = combatTime >= BOT_OPENING_SHOT_DELAY_MS && (game.botLastShotAt === null || game.simTime - game.botLastShotAt >= BOT_SHOT_COOLDOWN_MS);
-  for (const { ship, index } of shuffle(shooters)) {
-    const target = targets[Math.floor(Math.random() * targets.length)];
-    const shot = findBestShot(game, ship, index, target, ship.energy);
-    if (shot) return canFire ? { ...shot, bot: true } : null;
-  }
-
-  for (const { ship, index } of shuffle(shooters)) {
-    const target = targets[Math.floor(Math.random() * targets.length)];
-    const waypoint = findTacticalWaypoint(game, ship, target);
-    if (waypoint && ship.energy >= SHIP_ENERGY_MAX) {
-      return { type: 'move', role: 'guest', shipIndex: index, x: waypoint.x, y: waypoint.y };
+  if (canFire) {
+    for (const { ship, index } of shuffle(shooters)) {
+      const target = chooseBotTarget(ship, targets);
+      const shot = findBestShot(game, ship, index, target, ship.energy);
+      if (shot) return { ...shot, bot: true };
     }
   }
 
+  for (const { ship, index } of shuffle(shooters)) {
+    if (!canBotStartMove(ship)) continue;
+    const target = chooseBotTarget(ship, targets);
+    const waypoint = findTacticalWaypoint(game, ship, target);
+    if (waypoint) return { type: 'move', role: 'guest', shipIndex: index, x: waypoint.x, y: waypoint.y };
+  }
+
   return null;
+}
+
+function canBotStartMove(ship) {
+  return ship.energy >= BOT_MOVE_START_ENERGY;
+}
+
+function chooseBotTarget(shooter, targets) {
+  const ranked = shuffle(targets).sort((a, b) => Math.hypot(a.x - shooter.x, a.y - shooter.y) - Math.hypot(b.x - shooter.x, b.y - shooter.y));
+  return ranked[Math.floor(Math.random() * Math.min(2, ranked.length))];
 }
 
 function findRandomWaypoint(game, ship) {
