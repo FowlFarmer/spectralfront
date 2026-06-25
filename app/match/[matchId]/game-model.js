@@ -20,6 +20,10 @@ export const MATCH_OUTCOME_DELAY_MS = 2_000;
 export const BOT_OPENING_SHOT_DELAY_MS = 10_000;
 export const BOT_SHOT_COOLDOWN_MS = 5_000;
 export const BOT_MOVE_START_ENERGY = 40;
+export const STARTING_SHIP_ENERGY = Object.freeze([15, 30, 45, 60]);
+export const DEFAULT_HOST_COLOR = '#55d5cc';
+export const BOT_SHIP_COLOR = '#f27b82';
+export const PLAYER_COLOR_SWATCHES = Object.freeze(['#55d5cc', '#4ccfff', '#7aa7ff', '#9b8cff', '#c27cff', '#ff7fd7', '#ff8aa3', '#ff9d66', '#e7bd61', '#f7e26b', '#b8ef63', '#72e06a', '#48d597', '#62eadf', '#78f4ff', '#9cc8ff', '#c7a6ff', '#f0a6ff', '#ffb6d0', '#ffc6a3', '#ffe59b', '#d9ff8f', '#a7f08a', '#8cecc5', '#b7f7ee']);
 
 const ROLES = Object.freeze({ host: 'guest', guest: 'host' });
 export const PLANET_TYPES = Object.freeze(['moon', 'mercurian', 'lava', 'plutoid', 'marslike', 'desert', 'venuslike', 'earthlike', 'ocean', 'ice', 'superEarth', 'miniNeptune', 'neptune', 'uranian', 'gasGiant', 'saturnian']);
@@ -41,9 +45,20 @@ export const measurePathLength = path => {
 };
 
 export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { botMatch = false } = {}) => {
-  const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets);
-  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), trails: [], blooms: [], ships, planets, asteroids };
+  const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets), cosmetics = createCosmetics(seed, botMatch);
+  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), trails: [], blooms: [], ships, planets, asteroids, cosmetics };
 };
+
+function createCosmetics(seed, botMatch) {
+  const random = seededRandom((seed ^ 0x51f15e) >>> 0), colors = PLAYER_COLOR_SWATCHES.filter(color => color !== DEFAULT_HOST_COLOR && color !== BOT_SHIP_COLOR);
+  for (let index = colors.length - 1; index > 0; index -= 1) { const swap = Math.floor(random() * (index + 1)); [colors[index], colors[swap]] = [colors[swap], colors[index]]; }
+  const hostShipOptions = [DEFAULT_HOST_COLOR, ...colors.slice(0, 4)], guestShipOptions = botMatch ? [BOT_SHIP_COLOR] : [BOT_SHIP_COLOR, ...colors.slice(4, 8)];
+  const cosmetic = (color, shipOptions) => ({ color, ui: color, laser: color, ship: color, shipOptions });
+  return {
+    host: cosmetic(DEFAULT_HOST_COLOR, hostShipOptions),
+    guest: cosmetic(BOT_SHIP_COLOR, guestShipOptions),
+  };
+}
 
 function createShip(x, y, role, energy = 0) {
   return { x, y, hp: 1, energy, angle: role === 'host' ? 0 : Math.PI, vx: 0, vy: 0, waypoint: null, moving: false, braking: false };
@@ -51,11 +66,10 @@ function createShip(x, y, role, energy = 0) {
 
 function createFleets(random) {
   const margin = SHIP_RADIUS * 3, minimumSeparation = SHIP_RADIUS * 9;
-  const startingEnergy = Array.from({ length: 4 }, () => Math.round(between(random, 0, SHIP_ENERGY_MAX)));
   const fleet = side => {
     const ships = [], minX = side === 'host' ? margin : WORLD.width * (2 / 3) + margin, maxX = side === 'host' ? WORLD.width / 3 - margin : WORLD.width - margin;
     for (let attempt = 0; ships.length < 4 && attempt < 700; attempt += 1) {
-      const candidate = createShip(Math.round(between(random, minX, maxX)), Math.round(between(random, margin, WORLD.height - margin)), side, startingEnergy[ships.length]);
+      const candidate = createShip(Math.round(between(random, minX, maxX)), Math.round(between(random, margin, WORLD.height - margin)), side, STARTING_SHIP_ENERGY[ships.length]);
       if (ships.every(ship => Math.hypot(candidate.x - ship.x, candidate.y - ship.y) >= minimumSeparation)) ships.push(candidate);
     }
     if (ships.length !== 4) throw Error('Unable to place fleet.');
@@ -135,6 +149,7 @@ export const isCombatLocked = game => Boolean(game?.outcome || game?.pendingOutc
 
 const cloneGame = game => ({
   ...game,
+  cosmetics: game.cosmetics ? { host: { ...game.cosmetics.host, shipOptions: [...(game.cosmetics.host.shipOptions || [])] }, guest: { ...game.cosmetics.guest, shipOptions: [...(game.cosmetics.guest.shipOptions || [])] } } : undefined,
   ships: { host: game.ships.host.map(cloneShip), guest: game.ships.guest.map(cloneShip) },
   trails: [...(game.trails || [])],
   blooms: [...(game.blooms || [])],
@@ -244,7 +259,9 @@ function applyDeceleration(ship, dtSec, minSpeed) {
 }
 
 export function applyGameAction(game, action) {
-  if (!action || isCombatLocked(game)) return { game, ignored: true };
+  if (!action) return { game, ignored: true };
+  if (action.type === 'cosmetic') return applyCosmetic(game, action);
+  if (isCombatLocked(game)) return { game, ignored: true };
   if (game.phase !== 'live') return { game, ignored: true, reason: 'countdown' };
   if (action.type === 'fire') return applyFire(game, action);
   if (action.type === 'move') return applyMove(game, action);
@@ -252,8 +269,19 @@ export function applyGameAction(game, action) {
   return { game, ignored: true };
 }
 
+function applyCosmetic(game, action) {
+  const { role, target, value } = action;
+  if (!['host', 'guest'].includes(role) || !['color', 'ui', 'laser', 'ship'].includes(target)) return { game, ignored: true };
+  const current = game.cosmetics?.[role];
+  if (!current) return { game, ignored: true };
+  if (!(current.shipOptions || []).includes(value)) return { game, ignored: true };
+  const next = cloneGame(game);
+  next.cosmetics = { ...next.cosmetics, [role]: { ...next.cosmetics[role], color: value, ui: value, laser: value, ship: value } };
+  return { game: next };
+}
+
 function applyFire(game, action) {
-  const { expression, role, shipIndex, power = 100 } = action;
+  const { expression, role, shipIndex, power = 100, reverse = false } = action;
   const clampedPower = Math.max(1, Math.min(100, power));
   const cost = fireEnergyCost(clampedPower);
   if (!game.ships[role][shipIndex]?.hp) return { game, ignored: true };
@@ -261,7 +289,7 @@ function applyFire(game, action) {
   const next = cloneGame(game);
   const ship = next.ships[role][shipIndex];
   const maxDistance = beamDistanceForPower(clampedPower);
-  const path = trace(expression, ship, role, maxDistance);
+  const path = trace(expression, ship, role, maxDistance, reverse);
   if (!path.length) return { game: next, unstable: true, hit: false };
   ship.energy -= cost;
   let impact = null, resolvedPath = [];
@@ -280,7 +308,7 @@ function applyFire(game, action) {
   const stopReason = impact ? 'impact' : classifyPathStop(pathLength, maxDistance);
   next.shotNumber = (game.shotNumber || 0) + 1;
   const trail = {
-    id: next.shotNumber, role, shipIndex, expression, origin: { x: ship.x, y: ship.y }, impact,
+    id: next.shotNumber, role, shipIndex, expression, reverse, laser: next.cosmetics?.[role]?.laser, origin: { x: ship.x, y: ship.y }, impact,
     maxDistance, power: clampedPower, stopReason, pathLength, flightDuration: beamFlightDuration(pathLength),
   };
   next.trails = [...(next.trails || []), trail].slice(-8);
@@ -471,10 +499,10 @@ function shuffle(values) {
   return next;
 }
 
-export function trace(source, ship, role, maxDistance = MAX_BEAM_DISTANCE) {
+export function trace(source, ship, role, maxDistance = MAX_BEAM_DISTANCE, reverse = false) {
   let fn; try { fn = compileExpression(source); } catch { return []; }
   const originValue = fn(0); if (!Number.isFinite(originValue)) return [];
-  const direction = role === 'host' ? 1 : -1, path = [];
+  const direction = (role === 'host' ? 1 : -1) * (reverse ? -1 : 1), path = [];
   let traveled = 0, previous = null;
   const graphLimit = Math.ceil(Math.hypot(WORLD.width, WORLD.height) / WORLD_UNITS_PER_GRAPH_UNIT) + 2;
   for (let index = 0; index < 520; index += 1) {

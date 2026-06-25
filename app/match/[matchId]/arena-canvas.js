@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SHIP_RADIUS, SHOT_FLIGHT_MS, WORLD, beamDistanceForPower, mirrorWorldX, trace, worldDistanceToGraphUnits } from './game-model';
 
-export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', power = 100, previewDisabled = false }) {
+export default function ArenaCanvas({ game, role, selected, onSelectShip, onMoveShip, onCancelMove, matchOver, expression = '', reverse = false, power = 100, previewDisabled = false }) {
   const viewport = useRef(null), canvas = useRef(null);
   const eventStarts = useRef(new Map());
   const trailPaths = useRef(new Map());
@@ -37,15 +37,16 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
     for (let y = 0; y < WORLD.height; y += WORLD.grid) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(WORLD.width, y); ctx.stroke(); }
     const origin = game.ships[role]?.[selected];
     if (origin?.hp) {
-      ctx.setLineDash([5, 6]); ctx.strokeStyle = '#5fe2d455';
+      const axisColor = game.cosmetics?.[role]?.color || game.cosmetics?.[role]?.ship || '#5fe2d4';
+      ctx.setLineDash([5, 6]); ctx.strokeStyle = `${axisColor}55`;
       ctx.beginPath(); ctx.moveTo(0, origin.y); ctx.lineTo(WORLD.width, origin.y); ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, WORLD.height); ctx.stroke();
-      ctx.setLineDash([]); ctx.strokeStyle = '#5fe2d4'; ctx.beginPath(); ctx.arc(origin.x, origin.y, SHIP_RADIUS + 2, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = '#a7dcd8'; ctx.font = '10px DM Mono'; ctx.fillText('(0, 0)', origin.x + 15, origin.y - 13);
+      ctx.setLineDash([]); ctx.strokeStyle = axisColor; ctx.beginPath(); ctx.arc(origin.x, origin.y, SHIP_RADIUS + 2, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = axisColor; ctx.font = '10px DM Mono'; ctx.fillText('(0, 0)', origin.x + 15, origin.y - 13);
       if (origin.waypoint && origin.moving) drawWaypoint(ctx, origin, origin.waypoint, waypointHovered);
     }
     for (const planet of game.planets) drawPlanet(ctx, planet);
     for (const asteroid of game.asteroids || []) drawAsteroid(ctx, asteroid);
-    if (origin?.hp) drawTrajectoryPreview(ctx, expression, origin, role, power, previewDisabled);
+    if (origin?.hp) drawTrajectoryPreview(ctx, expression, origin, role, power, reverse, previewDisabled, game.cosmetics?.[role]?.laser);
     for (const trail of game.trails || []) {
       const age = eventAge(trail);
       const flightTime = trail.flightDuration || FLIGHT_TIME;
@@ -65,12 +66,12 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
         const ship = ships[index];
         if (!ship.hp) continue;
         const displayAngle = updateDisplayAngle(displayAngles.current, `${shipRole}-${index}`, ship, dtSec);
-        drawShip(ctx, ship, shipRole, displayAngle);
+        drawShip(ctx, ship, shipRole, displayAngle, game.cosmetics?.[shipRole]?.ship);
       }
     }
     if (cursor) drawCursorReadout(ctx, cursor, origin, bounds, mirrored);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }, [cursor, expression, game, mirrored, now, power, previewDisabled, role, selected, waypointHovered]);
+  }, [cursor, expression, game, mirrored, now, power, previewDisabled, reverse, role, selected, waypointHovered]);
 
   useEffect(() => { draw(); }, [draw]);
   useEffect(() => { const element = viewport.current; if (!element) return; const observer = new ResizeObserver(draw); observer.observe(element); return () => observer.disconnect(); }, [draw]);
@@ -120,10 +121,14 @@ export default function ArenaCanvas({ game, role, selected, onSelectShip, onMove
 
 const FLIGHT_TIME = SHOT_FLIGHT_MS, BLOOM_DURATION = 5200, TRAIL_FADE_TIME = 4200;
 const SHIP_TURN_RATE = 3.4;
-const PREVIEW_PATH_FRACTION = 0.38;
+const PREVIEW_MIN_GRAPH_UNITS = 1, PREVIEW_MAX_GRAPH_UNITS = 4;
 
-function truncatePathByFraction(path, fraction) {
-  const limit = pathLength(path) * fraction;
+function previewPathLength(power) {
+  const normalizedPower = (Math.max(5, Math.min(100, power)) - 5) / 95;
+  return (PREVIEW_MIN_GRAPH_UNITS + (PREVIEW_MAX_GRAPH_UNITS - PREVIEW_MIN_GRAPH_UNITS) * normalizedPower) * WORLD.grid;
+}
+
+function truncatePathByLength(path, limit) {
   if (limit <= 0 || path.length < 2) return path;
   let traveled = 0;
   const result = [path[0]];
@@ -141,22 +146,22 @@ function truncatePathByFraction(path, fraction) {
   return result;
 }
 
-function drawTrajectoryPreview(ctx, expression, ship, shipRole, power, disabled) {
+function drawTrajectoryPreview(ctx, expression, ship, shipRole, power, reverse, disabled, color = '#55d5cc') {
   if (disabled || !expression.trim()) return;
-  const path = trace(expression, ship, shipRole, beamDistanceForPower(power));
+  const path = trace(expression, ship, shipRole, beamDistanceForPower(power), reverse);
   if (path.length < 2) return;
-  const preview = truncatePathByFraction(path, PREVIEW_PATH_FRACTION);
+  const preview = truncatePathByLength(path, previewPathLength(power));
   ctx.save();
   ctx.setLineDash([5, 7]);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.strokeStyle = '#55d5cc88';
+  ctx.strokeStyle = `${color}88`;
   ctx.lineWidth = 1.1;
   ctx.beginPath();
   preview.forEach((point, index) => (index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)));
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = '#a7f5ef';
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(preview.at(-1).x, preview.at(-1).y, 1.6, 0, Math.PI * 2);
   ctx.fill();
@@ -219,8 +224,8 @@ function pointerToWorld(event, element, mirrored) {
   return { x, y };
 }
 
-function drawShip(ctx, ship, shipRole, displayAngle) {
-  const color = shipRole === 'host' ? '#5fe2d4' : '#f27b82';
+function drawShip(ctx, ship, shipRole, displayAngle, cosmeticColor) {
+  const color = cosmeticColor || (shipRole === 'host' ? '#5fe2d4' : '#f27b82');
   ctx.save();
   ctx.translate(ship.x, ship.y);
   ctx.rotate(displayAngle);
@@ -288,7 +293,7 @@ function formatCoordinate(value) { const rounded = Math.abs(value) < 0.005 ? 0 :
 function visualPathForTrail(trail, cache) {
   const cached = cache.get(trail.id);
   if (cached) return cached;
-  const fullPath = trace(trail.expression, trail.origin, trail.role, trail.maxDistance);
+  const fullPath = trace(trail.expression, trail.origin, trail.role, trail.maxDistance, trail.reverse);
   const path = trail.impact ? clipPathAtImpact(fullPath, trail.impact) : fullPath;
   cache.set(trail.id, path);
   return path;
@@ -316,7 +321,7 @@ function drawLaserTrail(ctx, trail, path, age, isFriendly) {
   const headDistance = progress * totalLength;
   const fade = age <= flightTime ? 1 : Math.max(0, 1 - (age - flightTime) / TRAIL_FADE_TIME);
   const head = pointAtDistance(path, headDistance).point;
-  const hitColor = isFriendly ? (impact ? '#ffaf6c' : '#4ccfff') : '#f04e5d';
+  const hitColor = trail.laser || (isFriendly ? (impact ? '#ffaf6c' : '#4ccfff') : '#f27b82');
 
   ctx.save();
   ctx.lineCap = 'round';

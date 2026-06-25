@@ -78,25 +78,83 @@ async function candidatePairSummary(pc) {
 }
 
 const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g, CONSTANT_SLIDER_LIMIT = 100, CONSTANT_SLIDER_SPAN = 1000;
+const alphaTokenNames = ['sqrt', 'sin', 'cos', 'tan', 'abs', 'log', 'exp', 'ln', 'pi'];
 function numericLiterals(expression) {
-  return Array.from(expression.matchAll(numericLiteralPattern), match => ({ value: Number(match[0]), start: match.index, end: match.index + match[0].length }))
-    .filter(literal => literal.value <= CONSTANT_SLIDER_LIMIT);
+  return Array.from(expression.matchAll(numericLiteralPattern), match => {
+    const numberStart = match.index, end = numberStart + match[0].length, rawValue = Number(match[0]);
+    const beforeNumber = expression.slice(0, numberStart), signMatch = beforeNumber.match(/(\s*([+\-])\s*)$/);
+    if (!signMatch) return { value: rawValue, start: numberStart, end, mode: 'bare' };
+    const signIndex = beforeNumber.length - signMatch[0].length, beforeSign = expression.slice(0, signIndex).trimEnd().at(-1);
+    const unary = !beforeSign || '()+-*/^'.includes(beforeSign);
+    return { value: signMatch[2] === '-' ? -rawValue : rawValue, start: unary ? signIndex : numberStart, operatorStart: unary ? null : signIndex, end, mode: unary ? 'unary' : 'binary' };
+  }).filter(literal => Math.abs(literal.value) <= CONSTANT_SLIDER_LIMIT);
+}
+function alphaTokens(word) {
+  const tokens = [], lower = word.toLowerCase();
+  for (let index = 0; index < lower.length;) {
+    const named = alphaTokenNames.find(name => lower.startsWith(name, index));
+    if (named) { tokens.push({ kind: named === 'pi' ? 'constant' : 'function', value: named }); index += named.length; continue; }
+    const letter = lower[index];
+    tokens.push({ kind: letter === 'x' || letter === 'y' ? 'variable' : 'parameter', value: letter });
+    index += 1;
+  }
+  return tokens;
+}
+function parameterSymbols(expression) {
+  const symbols = new Set();
+  for (const match of expression.toLowerCase().matchAll(/[a-z]+/g)) {
+    for (const token of alphaTokens(match[0])) if (token.kind === 'parameter') symbols.add(token.value);
+  }
+  return [...symbols].sort();
+}
+function activeFormulaParams(expression, params) {
+  return Object.fromEntries(parameterSymbols(expression).map(symbol => [symbol, Number.isFinite(params[symbol]) ? params[symbol] : 1]));
+}
+function materializeFormulaParams(expression, params) {
+  const active = activeFormulaParams(expression, params);
+  return expression.replace(/[a-z]+/gi, word => {
+    const tokens = alphaTokens(word);
+    if (!tokens.some(token => token.kind === 'parameter')) return word;
+    let output = '', previousValue = false;
+    for (const token of tokens) {
+      const currentValue = token.kind !== 'function';
+      if (output && previousValue && currentValue) output += '*';
+      if (output && previousValue && token.kind === 'function') output += '*';
+      output += token.kind === 'parameter' ? `(${formatConstant(Number.isFinite(active[token.value]) ? active[token.value] : 1)})` : token.value;
+      previousValue = currentValue;
+    }
+    return output;
+  });
 }
 function constantToSliderPosition(value) {
-  return Math.round(Math.sqrt(Math.min(CONSTANT_SLIDER_LIMIT, Math.max(0, value)) / CONSTANT_SLIDER_LIMIT) * CONSTANT_SLIDER_SPAN);
+  const clamped = Math.min(CONSTANT_SLIDER_LIMIT, Math.max(-CONSTANT_SLIDER_LIMIT, value));
+  if (clamped < -1) return Math.round((CONSTANT_SLIDER_SPAN / 4) * (1 - Math.sqrt((Math.abs(clamped) - 1) / (CONSTANT_SLIDER_LIMIT - 1))));
+  if (clamped < 0) return Math.round((CONSTANT_SLIDER_SPAN / 4) + (CONSTANT_SLIDER_SPAN / 4) * (clamped + 1));
+  if (clamped <= 1) return Math.round((CONSTANT_SLIDER_SPAN / 2) + (CONSTANT_SLIDER_SPAN / 4) * clamped);
+  return Math.round((CONSTANT_SLIDER_SPAN * 3 / 4) + (CONSTANT_SLIDER_SPAN / 4) * Math.sqrt((clamped - 1) / (CONSTANT_SLIDER_LIMIT - 1)));
 }
 function sliderPositionToConstant(position) {
   const normalized = Math.max(0, Math.min(CONSTANT_SLIDER_SPAN, position)) / CONSTANT_SLIDER_SPAN;
-  return normalized ** 2 * CONSTANT_SLIDER_LIMIT;
+  if (normalized < 0.25) return -(1 + (1 - normalized / 0.25) ** 2 * (CONSTANT_SLIDER_LIMIT - 1));
+  if (normalized < 0.5) return -1 + ((normalized - 0.25) / 0.25);
+  if (normalized <= 0.75) return (normalized - 0.5) / 0.25;
+  return 1 + ((normalized - 0.75) / 0.25) ** 2 * (CONSTANT_SLIDER_LIMIT - 1);
 }
 function formatConstant(value) {
-  const decimals = Math.abs(value) < 10 ? 2 : Math.abs(value) < 50 ? 1 : 0;
+  const decimals = Math.abs(value) < 2 ? 2 : Math.abs(value) < 10 ? 2 : Math.abs(value) < 50 ? 1 : 0;
   return String(Number(value.toFixed(decimals)));
 }
 function replaceNumericLiteral(expression, index, value) {
   const literal = numericLiterals(expression)[index];
   if (!literal) return expression;
-  return `${expression.slice(0, literal.start)}${formatConstant(value)}${expression.slice(literal.end)}`;
+  const magnitude = formatConstant(Math.abs(value));
+  const wrappedByParens = expression[literal.start - 1] === '(' && expression[literal.end] === ')';
+  const replacement = literal.mode === 'binary'
+    ? ` ${value < 0 ? '-' : '+'} ${magnitude}`
+    : literal.mode === 'bare'
+      ? value < 0 && !wrappedByParens ? `(${formatConstant(value)})` : formatConstant(value)
+      : `${value < 0 ? '-' : ''}${magnitude}`;
+  return `${expression.slice(0, literal.operatorStart ?? literal.start)}${replacement}${expression.slice(literal.end)}`;
 }
 
 export default function GameClient({ matchId }) {
@@ -104,9 +162,11 @@ export default function GameClient({ matchId }) {
   const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
   const botTimer = useRef(null), botTickKey = useRef(null);
   const noticeTimers = useRef(new Map()), simTimer = useRef(null);
+  const formulaField = useRef(null);
   const [game, setGame] = useState(null), [selected, setSelected] = useState(0), [link, setLink] = useState('LINKING');
   const [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x');
-  const [power, setPower] = useState(75), [notices, setNotices] = useState([]), [arcHistory, setArcHistory] = useState([]);
+  const [formulaParams, setFormulaParams] = useState({});
+  const [power, setPower] = useState(75), [reverseFire, setReverseFire] = useState(false), [notices, setNotices] = useState([]), [arcHistory, setArcHistory] = useState([]);
 
   const publish = useCallback(next => { gameRef.current = next; setGame(next); }, []);
   const send = useCallback(message => { if (channel.current?.readyState === 'open') channel.current.send(JSON.stringify(message)); }, []);
@@ -131,7 +191,7 @@ export default function GameClient({ matchId }) {
   const clearNotices = useCallback(() => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); noticeTimers.current.clear(); setNotices([]); }, []);
   const restartBotMatch = useCallback(() => {
     clearTimeout(botTimer.current); botTickKey.current = null;
-    clearNotices(); setSelected(0); setPower(75); pushNotice('trainingInitialized'); publish(createMatch(undefined, { botMatch: true }));
+    clearNotices(); setSelected(0); setPower(75); setReverseFire(false); setFormulaParams({}); pushNotice('trainingInitialized'); publish(createMatch(undefined, { botMatch: true }));
   }, [clearNotices, publish, pushNotice]);
   const rememberArc = useCallback(expression => { const arc = expression.trim(); if (arc) setArcHistory(history => [arc, ...history.filter(entry => entry !== arc)].slice(0, 6)); }, []);
 
@@ -192,6 +252,17 @@ export default function GameClient({ matchId }) {
     if (action.type === 'fire') rememberArc(action.expression);
     send({ type: 'action', action });
   }, [commitAction, isBotMatch, pushNotice, rememberArc, send]);
+
+  const submitCosmetic = useCallback(value => {
+    const me = session.current?.role;
+    if (!me) return;
+    const action = { type: 'cosmetic', role: me, target: 'color', value };
+    if (isBotMatch || me === 'host') {
+      commitAction(action);
+      return;
+    }
+    send({ type: 'action', action });
+  }, [commitAction, isBotMatch, send]);
 
   const handleMove = useCallback(point => {
     const me = session.current?.role;
@@ -315,10 +386,20 @@ export default function GameClient({ matchId }) {
 
   useEffect(() => { let cleanup; connect().then(fn => cleanup = fn); return () => { cleanup?.(); stop(); }; }, [connect, stop]);
   useEffect(() => () => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); }, []);
+  useEffect(() => {
+    const field = formulaField.current;
+    if (!field) return;
+    field.style.height = '0px';
+    field.style.height = `${Math.min(field.scrollHeight, 168)}px`;
+  }, [formula]);
 
   if (!game || problem) return <div className="game-shell"><header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div></header><section className="disconnected standalone"><div>{!problem && <div className="spinner" />}<h2>{problem ? 'Match unavailable' : 'Setting up the duel'}</h2><p>{problem || 'Securing a direct browser connection…'}</p><button className="primary" onClick={leave}>BACK TO LOBBY</button></div></section></div>;
 
   const me = session.current.role, foe = me === 'host' ? 'guest' : 'host', myShips = game.ships[me], selectedShip = game.ships[me][selected], matchOver = isMatchOver(game), combatLocked = isCombatLocked(game), combatActive = game.phase === 'live', won = game.outcome === me;
+  const myCosmetics = game.cosmetics?.[me] || { color: '#55d5cc', ui: '#55d5cc', laser: '#55d5cc', ship: '#55d5cc', shipOptions: ['#55d5cc'] };
+  const foeCosmetics = game.cosmetics?.[foe] || { color: '#f27b82', ui: '#f27b82', laser: '#f27b82', ship: '#f27b82', shipOptions: ['#f27b82'] };
+  const myColor = myCosmetics.color || myCosmetics.ship || '#55d5cc';
+  const foeColor = foeCosmetics.color || foeCosmetics.ship || '#f27b82';
   const myEnergy = selectedShip?.energy ?? 0, fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
   const countdownSeconds = Math.max(0, Math.ceil(((game.countdownMs ?? MATCH_COUNTDOWN_MS) - (game.simTime || 0)) / 1000));
   const canFire = combatActive && !combatLocked && myShips[selected]?.hp && myEnergy >= fireCost;
@@ -326,52 +407,68 @@ export default function GameClient({ matchId }) {
     if (combatLocked || !myShips[selected]?.hp) return;
     if (!combatActive) { pushNotice('combatStaging'); return; }
     if (myEnergy < fireCost) { pushNotice('notEnoughEnergyFire'); return; }
-    submitAction({ type: 'fire', role: me, shipIndex: selected, expression: formula, power });
+    submitAction({ type: 'fire', role: me, shipIndex: selected, expression: materializeFormulaParams(formula, formulaParams), power, reverse: reverseFire });
   };
 
   return (
-    <div className="game-shell">
+    <div className="game-shell" style={{ '--player-ui': myColor, '--player-laser': myColor, '--player-ship': myColor }}>
       <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><button className="leave" onClick={leave}>LEAVE MATCH</button></header>
       <main className="game-grid">
         <aside className="panel side">
-          <div className="fleet-command player active"><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · LEFT CLICK TO MOVE'}</small>
-            <div className="ship-select">{myShips.map((ship, index) => <div className="ship-command" key={index}><button disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} onClick={() => setSelected(index)}>SHIP {index + 1}<i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></button><div className="ship-energy" aria-label={`Ship ${index + 1} energy ${Math.round(ship.energy)} of ${ENERGY_MAX}`}><div className="ship-energy-fill" style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /><span>{Math.round(ship.energy)}<i> / {ENERGY_MAX}</i></span></div></div>)}</div>
+          <div className="fleet-command player active" style={{ '--fleet-ship': myColor }}><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · FIRE OR LEFT CLICK TO MOVE'}</small>
+            <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} aria-label={`Select ship ${index + 1}. Energy ${Math.round(ship.energy)} of ${ENERGY_MAX}. ${ship.hp ? (ship.moving ? 'Moving' : 'Ready') : 'Lost'}`} onClick={() => setSelected(index)}><span className="ship-choice-head"><b>SHIP {String(index + 1).padStart(2, '0')}</b><i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></span><span className="ship-energy" aria-hidden="true"><span className="ship-energy-fill" style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /><em>{Math.round(ship.energy)}<i> / {ENERGY_MAX}</i></em></span></button>)}</div>
           </div>
-          <div className="player enemy"><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'NAVIGATION AI · LIVE RESERVES' : 'LIVE ENERGY TELEMETRY'}</small><div className="enemy-ship-list">{game.ships[foe].map((ship, index) => <div className={'enemy-ship ' + (!ship.hp ? 'lost' : '')} key={index}><b>SHIP {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-label={`Enemy ship ${index + 1} energy ${Math.round(ship.energy)} of ${ENERGY_MAX}`}><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? Math.round(ship.energy) : 'LOST'}</span></div>)}</div></div>
-          <div className="rules">{combatActive ? 'Live combat — energy regenerates slowly. Left click to move a selected ship; click the waypoint to stop. Your fleet always appears on the left.' : 'Staging sequence — systems remain locked until the launch signal.'}</div>
+          <div className="player enemy" style={{ '--enemy-ship': foeColor }}><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : isBotMatch ? 'ENERGY RESERVES' : 'ENERGY RESERVES'}</small><div className="enemy-ship-list">{game.ships[foe].map((ship, index) => <div className={'enemy-ship ' + (!ship.hp ? 'lost' : '')} key={index}><b>SHIP {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-label={`Enemy ship ${index + 1} energy ${Math.round(ship.energy)} of ${ENERGY_MAX}`}><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? Math.round(ship.energy) : 'LOST'}</span></div>)}</div></div>
+          <CosmeticControls cosmetics={myCosmetics} onChange={submitCosmetic} />
         </aside>
         <section className="panel arena-wrap">
           <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : combatActive ? `LIVE · ${Math.round((game.simTime || 0) / 1000)}s` : 'STAGING SEQUENCE'}</span></div>
           <div className="arena-stage">
-            <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={combatLocked} expression={formula} power={power} previewDisabled={combatLocked || !combatActive} />
+            <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={combatLocked} expression={materializeFormulaParams(formula, formulaParams)} reverse={reverseFire} power={power} previewDisabled={combatLocked || !combatActive} />
             <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
             {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
           </div>
           {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} onRestart={restartBotMatch} onLeave={leave} />}
-          <section className="command">
-            <div className="formula">
-              <label>FIRING ARC — Y = F(X)</label>
-              <div className="formula-row"><span>y =</span><input value={formula} disabled={combatLocked} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
-              <FunctionConstantSliders formula={formula} disabled={combatLocked} onChange={(index, value) => setFormula(current => replaceNumericLiteral(current, index, value))} />
-              <div className="power-control">
-                <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange} graph units · {Math.round(fireCost)} energy</label>
-                <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={combatLocked} onChange={event => setPower(+event.target.value)} />
-              </div>
-              <div className="hint">{matchOver ? 'Command channel closed.' : !combatActive ? `Systems unlock in ${countdownSeconds}s. Set an arc while you wait.` : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship (0, 0) · sin, cos, tan, abs, sqrt, log/ln, exp'}</div>
-              {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={combatLocked} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
-            </div>
-            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : !combatActive ? 'SYSTEMS ARMING' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM'}</button>
-          </section>
         </section>
+        <aside className="panel command-panel" aria-label="Fire control computer">
+          <div className="formula command-editor">
+            <div className="command-head"><span>FIRE COMPUTER</span><b>{combatActive ? 'ARMED' : 'STAGING'}</b></div>
+            <label>FIRING ARC: Y = F(X)</label>
+            <div className="formula-row"><span>y =</span><textarea ref={formulaField} rows={1} value={formula} disabled={combatLocked} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
+          </div>
+          <div className="command-scroll">
+            <FunctionConstantSliders formula={formula} params={formulaParams} disabled={combatLocked} onNumberChange={(index, value) => setFormula(current => replaceNumericLiteral(current, index, value))} onParamChange={(symbol, value) => setFormulaParams(current => ({ ...current, [symbol]: value }))} />
+            {arcHistory.length > 0 && <div className="arc-history" aria-label="Previous firing arcs"><span>ARC BANK</span><div>{arcHistory.map((arc, index) => <button key={arc} type="button" disabled={combatLocked} className={arc === formula ? 'selected' : ''} onClick={() => setFormula(arc)}><b>{String(index + 1).padStart(2, '0')}</b>{arc}</button>)}</div></div>}
+          </div>
+          <div className="command-footer">
+            <div className="power-control">
+              <label htmlFor="beam-power">BEAM POWER — {power}% · {beamRange} graph units · {Math.round(fireCost)} energy</label>
+              <input id="beam-power" type="range" min="5" max="100" value={power} style={{ '--power-fill': `${((power - 5) / 95) * 100}%` }} disabled={combatLocked} onChange={event => setPower(+event.target.value)} />
+            </div>
+            <button type="button" className={'reverse-fire ' + (reverseFire ? 'active' : '')} disabled={combatLocked} onClick={() => setReverseFire(value => !value)}><span>FIRE DIRECTION</span><b>{reverseFire ? 'REVERSE' : 'FORWARD'}</b></button>
+            <div className="hint">{matchOver ? 'Command channel closed.' : !combatActive ? `Unlocks in ${countdownSeconds}s.` : myEnergy < fireCost ? `Need ${Math.round(fireCost - myEnergy)} more energy.` : 'Origin: selected ship · +x points enemyward.'}</div>
+            <button className="fire" disabled={!canFire} onClick={fireCurrent}>{matchOver ? 'MATCH ENDED' : !combatActive ? 'SYSTEMS ARMING' : myEnergy < fireCost ? 'LOW ENERGY' : 'FIRE BEAM'}</button>
+          </div>
+        </aside>
       </main>
     </div>
   );
 }
 
-function FunctionConstantSliders({ formula, disabled, onChange }) {
-  const constants = numericLiterals(formula);
-  if (!constants.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add a number from 0 to 100 to tune it with a slider.</p></section>;
-  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>0 ⇄ 100 · FINE LOW END</small></div><div className="constant-slider-list">{constants.map((constant, index) => <label className="constant-slider" key={`${constant.start}-${index}`}><b>C{String(index + 1).padStart(2, '0')}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(constant.value)} disabled={disabled} onChange={event => onChange(index, sliderPositionToConstant(Number(event.target.value)))} /><output>{formatConstant(constant.value)}</output></label>)}</div></section>;
+function FunctionConstantSliders({ formula, params, disabled, onNumberChange, onParamChange }) {
+  const constants = numericLiterals(formula), symbols = parameterSymbols(formula);
+  if (!constants.length && !symbols.length) return <section className="constant-tuners empty"><span>FUNCTION CONSTANTS</span><p>Add numbers or letters like a, b, c to tune them with sliders.</p></section>;
+  return <section className="constant-tuners" aria-label="Function constant sliders"><div className="constant-tuners-head"><span>FUNCTION CONSTANTS</span><small>-100 ⇄ 100 · CENTER ZERO</small></div><div className="constant-slider-list">{symbols.map(symbol => { const value = Number.isFinite(params[symbol]) ? params[symbol] : 1; return <label className="constant-slider symbol-slider" key={`symbol-${symbol}`}><b>{symbol}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(value)} disabled={disabled} onChange={event => onParamChange(symbol, sliderPositionToConstant(Number(event.target.value)))} /><output>{formatConstant(value)}</output></label>; })}{constants.map((constant, index) => <label className="constant-slider" key={`${constant.start}-${index}`}><b>C{String(index + 1).padStart(2, '0')}</b><input type="range" min="0" max={CONSTANT_SLIDER_SPAN} step="1" value={constantToSliderPosition(constant.value)} disabled={disabled} onChange={event => onNumberChange(index, sliderPositionToConstant(Number(event.target.value)))} /><output>{formatConstant(constant.value)}</output></label>)}</div></section>;
+}
+
+function CosmeticControls({ cosmetics, onChange }) {
+  const color = cosmetics.color || cosmetics.ship;
+  return <section className="cosmetic-controls" aria-label="Commander color controls"><div className="cosmetic-title"><span>COMMANDER SIGNATURE</span><i style={{ '--swatch': color }} aria-hidden="true" /></div><ColorRow label="" value={color} options={cosmetics.shipOptions || []} onChange={onChange} /></section>;
+}
+
+function ColorRow({ label, value, options, onChange }) {
+  const name = label || 'Commander';
+  return <div className="color-row">{label && <span>{label}</span>}<div>{options.map((color, index) => <button key={color} type="button" aria-label={`${name} color option ${index + 1}`} className={color === value ? 'selected' : ''} style={{ '--swatch': color }} onClick={() => onChange(color)}><i /><b>{String(index + 1).padStart(2, '0')}</b></button>)}</div></div>;
 }
 
 function LaunchCountdown({ seconds }) {
