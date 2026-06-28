@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import ArenaCanvas from './arena-canvas';
+import { USERNAME_STORAGE_KEY } from '../../../lib/usernames';
 import {
   advanceSimulation,
   applyGameAction,
@@ -163,7 +164,7 @@ export default function GameClient({ matchId }) {
   const router = useRouter(), isBotMatch = matchId.startsWith('bot-');
   const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
   const botTimer = useRef(null), botTickKey = useRef(null);
-  const noticeTimers = useRef(new Map()), simTimer = useRef(null);
+  const noticeTimers = useRef(new Map()), simTimer = useRef(null), botClearSubmitted = useRef(null);
   const formulaField = useRef(null);
   const [game, setGame] = useState(null), [selected, setSelected] = useState(0), [link, setLink] = useState('LINKING');
   const [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x');
@@ -194,6 +195,7 @@ export default function GameClient({ matchId }) {
   const clearNotices = useCallback(() => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); noticeTimers.current.clear(); setNotices([]); }, []);
   const restartBotMatch = useCallback(() => {
     clearTimeout(botTimer.current); botTickKey.current = null;
+    botClearSubmitted.current = null;
     clearNotices(); setSelected(0); setPower(75); setReverseFire(false); setFormulaParams({}); pushNotice('trainingInitialized'); publish(createMatch(undefined, { botMatch: true }));
   }, [clearNotices, publish, pushNotice]);
   const rememberArc = useCallback(expression => { const arc = expression.trim(); if (arc) setArcHistory(history => [arc, ...history.filter(entry => entry !== arc)].slice(0, 6)); }, []);
@@ -400,6 +402,17 @@ export default function GameClient({ matchId }) {
     field.style.height = '0px';
     field.style.height = `${Math.max(FORMULA_FIELD_MIN_HEIGHT, Math.min(field.scrollHeight, 168))}px`;
   }, [formula]);
+  useEffect(() => {
+    const me = session.current?.role;
+    if (!isBotMatch || !game || !me || !isMatchOver(game) || game.outcome !== me) return;
+    const clearTimeMs = Math.max(1, Math.round((game.simTime || 0) - (game.countdownMs ?? MATCH_COUNTDOWN_MS)));
+    const clearKey = `${game.seed}:${game.outcome}:${clearTimeMs}`;
+    if (botClearSubmitted.current === clearKey) return;
+    botClearSubmitted.current = clearKey;
+    const username = localStorage.getItem(USERNAME_STORAGE_KEY);
+    if (!username) return;
+    fetch('/api/leaderboard', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, timeMs: clearTimeMs }) }).catch(() => {});
+  }, [game, isBotMatch]);
   const fireCurrent = useCallback(() => {
     const current = gameRef.current, me = session.current?.role;
     if (!current || !me) return;
@@ -447,6 +460,7 @@ export default function GameClient({ matchId }) {
   const myColor = myCosmetics.color || myCosmetics.ship || '#55d5cc';
   const foeColor = foeCosmetics.color || foeCosmetics.ship || '#f27b82';
   const myEnergy = selectedShip?.energy ?? 0, fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
+  const botClearTimeMs = isBotMatch && matchOver && won ? Math.max(1, Math.round((game.simTime || 0) - (game.countdownMs ?? MATCH_COUNTDOWN_MS))) : null;
   const countdownSeconds = Math.max(0, Math.ceil(((game.countdownMs ?? MATCH_COUNTDOWN_MS) - (game.simTime || 0)) / 1000));
   const canFire = combatActive && !combatLocked && myShips[selected]?.hp && myEnergy >= fireCost;
   const pingEnemyShip = index => {
@@ -473,7 +487,7 @@ export default function GameClient({ matchId }) {
             <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
             {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
           </div>
-          {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} onRestart={restartBotMatch} onLeave={leave} />}
+          {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} clearTimeMs={botClearTimeMs} onRestart={restartBotMatch} onLeave={leave} />}
         </section>
         <aside className="panel command-panel" aria-label="Fire control computer">
           <div className="formula command-editor">
@@ -568,7 +582,13 @@ function LaunchCountdown({ seconds }) {
   return <section className="launch-countdown" aria-live="polite"><div className="launch-kicker">ENGAGEMENT WINDOW</div><output>{seconds}</output><p>Fleet synchronized · opening reserves randomized</p></section>;
 }
 
-function MatchConclusion({ won, isBotMatch, myRemaining, foeRemaining, onRestart, onLeave }) {
+function formatClearTime(timeMs) {
+  const totalSeconds = Math.max(0, Math.round(timeMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60), seconds = totalSeconds % 60;
+  return minutes ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`;
+}
+
+function MatchConclusion({ won, isBotMatch, myRemaining, foeRemaining, clearTimeMs, onRestart, onLeave }) {
   const title = won ? 'SECTOR SECURED' : 'FLEET LOST', detail = won ? (isBotMatch ? 'Training objective complete. The bot fleet is dark.' : 'Opponent fleet eliminated. Your sector is secure.') : (isBotMatch ? 'The navigation AI eliminated your fleet.' : 'Your opponent eliminated the fleet.');
-  return <section className={'match-conclusion ' + (won ? 'victory' : 'defeat')} role="dialog" aria-modal="true" aria-labelledby="match-result-title"><div className="result-signal">{won ? '◈' : '✕'} MATCH RESULT</div><h2 id="match-result-title">{title}</h2><p>{detail}</p><div className="result-score"><span><b>{myRemaining}</b> YOUR SHIPS</span><i>:</i><span><b>{foeRemaining}</b> {isBotMatch ? 'BOT SHIPS' : 'RIVAL SHIPS'}</span></div>{isBotMatch ? <button className="result-primary" onClick={onRestart}>RUN NEW TRAINING MATCH</button> : <button className="result-primary" onClick={onLeave}>RETURN TO LOBBY</button>}<button className="result-secondary" onClick={onLeave}>{isBotMatch ? 'RETURN TO LOBBY' : 'LEAVE MATCH'}</button></section>;
+  return <section className={'match-conclusion ' + (won ? 'victory' : 'defeat')} role="dialog" aria-modal="true" aria-labelledby="match-result-title"><div className="result-signal">{won ? '◈' : '✕'} MATCH RESULT</div><h2 id="match-result-title">{title}</h2><p>{detail}</p><div className="result-score"><span><b>{myRemaining}</b> YOUR SHIPS</span><i>:</i><span><b>{foeRemaining}</b> {isBotMatch ? 'BOT SHIPS' : 'RIVAL SHIPS'}</span>{clearTimeMs && <><i>:</i><span><b>{formatClearTime(clearTimeMs)}</b> CLEAR</span></>}</div>{isBotMatch ? <button className="result-primary" onClick={onRestart}>RUN NEW TRAINING MATCH</button> : <button className="result-primary" onClick={onLeave}>RETURN TO LOBBY</button>}<button className="result-secondary" onClick={onLeave}>{isBotMatch ? 'RETURN TO LOBBY' : 'LEAVE MATCH'}</button></section>;
 }
