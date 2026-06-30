@@ -161,10 +161,10 @@ function replaceNumericLiteral(expression, index, value) {
 }
 
 export default function GameClient({ matchId }) {
-  const router = useRouter(), isBotMatch = matchId.startsWith('bot-');
+  const router = useRouter(), isBotMatch = matchId.startsWith('bot-'), isOnslaughtMatch = matchId.startsWith('onslaught-'), isLocalBotMatch = isBotMatch || isOnslaughtMatch;
   const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
   const botTimer = useRef(null), botTickKey = useRef(null);
-  const noticeTimers = useRef(new Map()), simTimer = useRef(null), botClearSubmitted = useRef(null);
+  const noticeTimers = useRef(new Map()), simTimer = useRef(null), scoreSubmitted = useRef(null);
   const formulaField = useRef(null);
   const [game, setGame] = useState(null), [selected, setSelected] = useState(0), [link, setLink] = useState('LINKING');
   const [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x');
@@ -175,16 +175,16 @@ export default function GameClient({ matchId }) {
   const publish = useCallback(next => { gameRef.current = next; setGame(next); }, []);
   const send = useCallback(message => { if (channel.current?.readyState === 'open') channel.current.send(JSON.stringify(message)); }, []);
   const reportWebRTC = useCallback((event, details = {}, level = 'info') => {
-    if (isBotMatch) return;
+    if (isLocalBotMatch) return;
     console[level](`[spectral-front:webrtc] ${event} ${JSON.stringify(details)}`);
     const ticket = session.current?.ticket;
     if (ticket) fetch('/api/telemetry', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket, event, details }) }).catch(() => {});
-  }, [isBotMatch]);
+  }, [isLocalBotMatch]);
   const stop = useCallback(() => {
     clearTimeout(botTimer.current); botTickKey.current = null;
     clearInterval(simTimer.current); channel.current?.close(); peer.current?.close();
   }, []);
-  const leave = useCallback(async () => { if (!isBotMatch) try { await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: session.current?.ticket, message: { type: 'peer-left' } }) }); } catch {} stop(); sessionStorage.removeItem(sessionKey); router.push('/'); }, [isBotMatch, router, stop]);
+  const leave = useCallback(async () => { if (!isLocalBotMatch) try { await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: session.current?.ticket, message: { type: 'peer-left' } }) }); } catch {} stop(); sessionStorage.removeItem(sessionKey); router.push('/'); }, [isLocalBotMatch, router, stop]);
   const pushNotice = useCallback(key => {
     const notification = notificationFor(key);
     if (!notification) return;
@@ -195,8 +195,13 @@ export default function GameClient({ matchId }) {
   const clearNotices = useCallback(() => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); noticeTimers.current.clear(); setNotices([]); }, []);
   const restartBotMatch = useCallback(() => {
     clearTimeout(botTimer.current); botTickKey.current = null;
-    botClearSubmitted.current = null;
+    scoreSubmitted.current = null;
     clearNotices(); setSelected(0); setPower(75); setReverseFire(false); setFormulaParams({}); pushNotice('trainingInitialized'); publish(createMatch(undefined, { botMatch: true }));
+  }, [clearNotices, publish, pushNotice]);
+  const restartOnslaughtMatch = useCallback(() => {
+    clearTimeout(botTimer.current); botTickKey.current = null;
+    scoreSubmitted.current = null;
+    clearNotices(); setSelected(0); setPower(75); setReverseFire(false); setFormulaParams({}); pushNotice('onslaughtInitialized'); publish(createMatch(undefined, { botMatch: true, onslaught: true }));
   }, [clearNotices, publish, pushNotice]);
   const rememberArc = useCallback(expression => { const arc = expression.trim(); if (arc) setArcHistory(history => [arc, ...history.filter(entry => entry !== arc)].slice(0, 6)); }, []);
 
@@ -220,13 +225,13 @@ export default function GameClient({ matchId }) {
         if (event.role === me) pushNotice(event.key);
       }
       publish(result.game);
-      if (!isBotMatch) send({ type: 'state', state: result.game, events: [...events, ...(result.gameEvents || [])] });
+      if (!isLocalBotMatch) send({ type: 'state', state: result.game, events: [...events, ...(result.gameEvents || [])] });
       return result;
     }
     publish(result.game);
-    if (!isBotMatch) send({ type: 'state', state: result.game, events: result.gameEvents || [] });
+    if (!isLocalBotMatch) send({ type: 'state', state: result.game, events: result.gameEvents || [] });
     return result;
-  }, [isBotMatch, publish, pushNotice, rememberArc, send]);
+  }, [isLocalBotMatch, publish, pushNotice, rememberArc, send]);
 
   const notifyEvents = useCallback(events => {
     const me = session.current?.role;
@@ -250,24 +255,24 @@ export default function GameClient({ matchId }) {
       pushNotice('notEnoughEnergyMove');
       return;
     }
-    if (isBotMatch || me === 'host') {
+    if (isLocalBotMatch || me === 'host') {
       commitAction(action);
       return;
     }
     if (action.type === 'fire') rememberArc(action.expression);
     send({ type: 'action', action });
-  }, [commitAction, isBotMatch, pushNotice, rememberArc, send]);
+  }, [commitAction, isLocalBotMatch, pushNotice, rememberArc, send]);
 
   const submitCosmetic = useCallback(value => {
     const me = session.current?.role;
     if (!me) return;
     const action = { type: 'cosmetic', role: me, target: 'color', value };
-    if (isBotMatch || me === 'host') {
+    if (isLocalBotMatch || me === 'host') {
       commitAction(action);
       return;
     }
     send({ type: 'action', action });
-  }, [commitAction, isBotMatch, send]);
+  }, [commitAction, isLocalBotMatch, send]);
 
   const handleMove = useCallback(point => {
     const me = session.current?.role;
@@ -295,31 +300,36 @@ export default function GameClient({ matchId }) {
 
   useEffect(() => {
     clearInterval(simTimer.current);
-    const isAuthority = isBotMatch || session.current?.role === 'host';
+    const isAuthority = isLocalBotMatch || session.current?.role === 'host';
     if (!game || isMatchOver(game) || !isAuthority) return;
     simTimer.current = window.setInterval(() => {
       const { game: next, events } = advanceSimulation(gameRef.current, SIM_TICK_MS);
       if (next.simTime !== gameRef.current?.simTime) {
         publish(next);
         notifyEvents(events);
-        if (!isBotMatch) send({ type: 'state', state: next, events });
+        if (!isLocalBotMatch) send({ type: 'state', state: next, events });
       }
     }, SIM_TICK_MS);
     return () => clearInterval(simTimer.current);
-  }, [game?.outcome, game?.seed, isBotMatch, notifyEvents, publish, send]);
+  }, [game?.outcome, game?.seed, isLocalBotMatch, notifyEvents, publish, send]);
 
   useEffect(() => {
     clearTimeout(botTimer.current);
     const tickKey = game ? `${game.seed}:${botDecisionWindow}` : null;
-    if (!isBotMatch || isCombatLocked(game) || game?.phase !== 'live') { botTickKey.current = null; return; }
+    if (!isLocalBotMatch || isCombatLocked(game) || game?.phase !== 'live') { botTickKey.current = null; return; }
     if (botTickKey.current === tickKey) return;
     botTickKey.current = tickKey;
     botTimer.current = window.setTimeout(() => takeBotTurn(tickKey), 150 + Math.random() * 180);
     return () => { clearTimeout(botTimer.current); if (botTickKey.current === tickKey) botTickKey.current = null; };
-  }, [botDecisionWindow, game?.outcome, game?.phase, game?.seed, isBotMatch, takeBotTurn]);
+  }, [botDecisionWindow, game?.outcome, game?.phase, game?.seed, isLocalBotMatch, takeBotTurn]);
 
   const connect = useCallback(async () => {
-    if (isBotMatch) { session.current = { role: 'host' }; setLink('BOT UPLINK'); publish(createMatch(undefined, { botMatch: true })); return; }
+    if (isLocalBotMatch) {
+      session.current = { role: 'host' };
+      setLink(isOnslaughtMatch ? 'ONSLAUGHT UPLINK' : 'BOT UPLINK');
+      publish(createMatch(undefined, { botMatch: true, onslaught: isOnslaughtMatch }));
+      return;
+    }
     const stored = JSON.parse(sessionStorage.getItem(sessionKey) || 'null'); if (!stored || stored.matchId !== matchId) { router.replace('/'); return; }
     session.current = stored;
     try {
@@ -387,7 +397,7 @@ export default function GameClient({ matchId }) {
       (async () => { while (!cancelled && pc.connectionState !== 'closed') { try { const { messages = [] } = await request(`/api/signal?ticket=${encodeURIComponent(stored.ticket)}`); for (const message of messages) { if (message.type === 'offer' && stored.role === 'guest') { reportWebRTC('offer_received'); await setRemoteDescription(message.sdp, 'offer'); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: stored.ticket, message: { type: 'answer', sdp: answer } }) }); reportWebRTC('answer_sent'); } if (message.type === 'answer' && stored.role === 'host') { await setRemoteDescription(message.sdp, 'answer'); reportWebRTC('answer_received'); } if (message.type === 'candidate') { reportWebRTC('remote_candidate_received', candidateDetails(message.candidate)); await addRemoteCandidate(message.candidate); } if (message.type === 'peer-left' && !isMatchOver(gameRef.current)) { reportWebRTC('peer_disconnected', { reason: 'peer-left' }, 'warn'); setProblem('The other commander left the duel.'); } } } catch (error) { if (Date.now() - lastSignalFailureAt > 5000) { lastSignalFailureAt = Date.now(); reportWebRTC('signal_poll_error', { reason: error.message }, 'warn'); } } await new Promise(resolvePoll => setTimeout(resolvePoll, 600)); } })();
       return () => { cancelled = true; };
     } catch (error) { reportWebRTC('peer_connection_error', { reason: error.message }, 'warn'); setProblem(error.message); }
-  }, [commitAction, isBotMatch, matchId, notifyEvents, publish, reportWebRTC, router, send]);
+  }, [commitAction, isLocalBotMatch, isOnslaughtMatch, matchId, notifyEvents, publish, reportWebRTC, router, send]);
 
   useEffect(() => { let cleanup; connect().then(fn => cleanup = fn); return () => { cleanup?.(); stop(); }; }, [connect, stop]);
   useEffect(() => () => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); }, []);
@@ -404,15 +414,15 @@ export default function GameClient({ matchId }) {
   }, [formula]);
   useEffect(() => {
     const me = session.current?.role;
-    if (!isBotMatch || !game || !me || !isMatchOver(game) || game.outcome !== me) return;
-    const clearTimeMs = Math.max(1, Math.round((game.simTime || 0) - (game.countdownMs ?? MATCH_COUNTDOWN_MS)));
-    const clearKey = `${game.seed}:${game.outcome}:${clearTimeMs}`;
-    if (botClearSubmitted.current === clearKey) return;
-    botClearSubmitted.current = clearKey;
+    if (!isOnslaughtMatch || !game || !me || !isMatchOver(game)) return;
+    const destroyed = Math.max(0, Math.round(game.onslaughtDestroyed || 0));
+    const scoreKey = `${game.seed}:${game.outcome}:${destroyed}`;
+    if (scoreSubmitted.current === scoreKey) return;
+    scoreSubmitted.current = scoreKey;
     const username = localStorage.getItem(USERNAME_STORAGE_KEY);
     if (!username) return;
-    fetch('/api/leaderboard', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, timeMs: clearTimeMs }) }).catch(() => {});
-  }, [game, isBotMatch]);
+    fetch('/api/leaderboard', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, kills: destroyed }) }).catch(() => {});
+  }, [game, isOnslaughtMatch]);
   const fireCurrent = useCallback(() => {
     const current = gameRef.current, me = session.current?.role;
     if (!current || !me) return;
@@ -461,6 +471,8 @@ export default function GameClient({ matchId }) {
   const foeColor = foeCosmetics.color || foeCosmetics.ship || '#f27b82';
   const myEnergy = selectedShip?.energy ?? 0, fireCost = fireEnergyCost(power), beamRange = Math.round(worldDistanceToGraphUnits(beamDistanceForPower(power)));
   const botClearTimeMs = isBotMatch && matchOver && won ? Math.max(1, Math.round((game.simTime || 0) - (game.countdownMs ?? MATCH_COUNTDOWN_MS))) : null;
+  const onslaughtDestroyed = isOnslaughtMatch ? game.onslaughtDestroyed || 0 : null;
+  const foeShipEntries = game.ships[foe].map((ship, index) => ({ ship, index })).filter(({ ship }) => !isOnslaughtMatch || ship.hp);
   const countdownSeconds = Math.max(0, Math.ceil(((game.countdownMs ?? MATCH_COUNTDOWN_MS) - (game.simTime || 0)) / 1000));
   const canFire = combatActive && !combatLocked && myShips[selected]?.hp && myEnergy >= fireCost;
   const pingEnemyShip = index => {
@@ -471,23 +483,23 @@ export default function GameClient({ matchId }) {
 
   return (
     <div className="game-shell" style={{ '--player-ui': myColor, '--player-laser': myColor, '--player-ship': myColor }}>
-      <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><div className="top-actions"><HotkeyHelp /><button className="leave" onClick={leave}>LEAVE MATCH</button></div></header>
+      <header className="game-top"><div className="brand">SPECTRAL <i>FRONT</i></div><div className="match-meta"><span className="online">● {link}</span> &nbsp; {isOnslaughtMatch ? 'ONSLAUGHT' : isBotMatch ? 'TRAINING MATCH' : `MATCH ${matchId.slice(0, 6).toUpperCase()}`}</div><div className="top-actions"><HotkeyHelp /><button className="leave" onClick={leave}>LEAVE MATCH</button></div></header>
       <main className="game-grid">
         <aside className="panel side">
           <div className="fleet-command player active" style={{ '--fleet-ship': myColor }}><strong>YOUR FLEET</strong><small>{matchOver ? `${liveShips(game, me).length} SURVIVING` : 'SELECT SHIP · FIRE OR LEFT CLICK TO MOVE'}</small>
             <div className="ship-select">{myShips.map((ship, index) => <button key={index} disabled={!ship.hp || combatLocked} className={'ship-choice ' + (index === selected ? 'selected' : '') + (ship.hp && ship.moving ? ' moving' : '')} aria-label={`Select ship ${index + 1}. Energy ${Math.round(ship.energy)} of ${ENERGY_MAX}. ${ship.hp ? (ship.moving ? 'Moving' : 'Ready') : 'Lost'}`} onClick={() => setSelected(index)}><span className="ship-choice-head"><b>SHIP {String(index + 1).padStart(2, '0')}</b><i>{ship.hp ? (ship.moving ? 'MOVING' : 'READY') : 'LOST'}</i></span><span className="ship-energy" aria-hidden="true"><span className="ship-energy-fill" style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /><em>{Math.round(ship.energy)}<i> / {ENERGY_MAX}</i></em></span></button>)}</div>
           </div>
-          <div className="player enemy" style={{ '--enemy-ship': foeColor }}><strong>{isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{matchOver ? `${liveShips(game, foe).length} SURVIVING` : 'ENERGY RESERVES · CLICK TO LOCATE'}</small><div className="enemy-ship-list">{game.ships[foe].map((ship, index) => <button type="button" key={index} disabled={!ship.hp} className={'enemy-ship' + (!ship.hp ? ' lost' : '') + (enemyPing?.shipIndex === index ? ' pinging' : '')} aria-label={ship.hp ? `Locate enemy ship ${index + 1} on the battlefield` : `Enemy ship ${index + 1} lost`} onClick={() => pingEnemyShip(index)}><b>SHIP {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-hidden="true"><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? Math.round(ship.energy) : 'LOST'}</span></button>)}</div></div>
+          <div className="player enemy" style={{ '--enemy-ship': foeColor }}><strong>{isOnslaughtMatch ? 'ONSLAUGHT WAVE' : isBotMatch ? 'BOT FLEET' : 'RIVAL FLEET'}</strong><small>{isOnslaughtMatch ? `${liveShips(game, foe).length}/7 ACTIVE · ${onslaughtDestroyed} DESTROYED` : matchOver ? `${liveShips(game, foe).length} SURVIVING` : 'ENERGY RESERVES · CLICK TO LOCATE'}</small><div className="enemy-ship-list">{foeShipEntries.map(({ ship, index }) => <button type="button" key={index} disabled={!ship.hp} className={'enemy-ship' + (!ship.hp ? ' lost' : '') + (enemyPing?.shipIndex === index ? ' pinging' : '') + (ship.entryTargetX != null ? ' entering' : '')} aria-label={ship.hp ? `Locate enemy ship ${index + 1} on the battlefield` : `Enemy ship ${index + 1} lost`} onClick={() => pingEnemyShip(index)}><b>{isOnslaughtMatch ? 'BOGEY' : 'SHIP'} {String(index + 1).padStart(2, '0')}</b><div className="enemy-energy" aria-hidden="true"><i style={{ width: `${(ship.energy / ENERGY_MAX) * 100}%` }} /></div><span>{ship.hp ? (ship.entryTargetX != null ? 'IN' : Math.round(ship.energy)) : 'LOST'}</span></button>)}</div></div>
           <CosmeticControls cosmetics={myCosmetics} onChange={submitCosmetic} />
         </aside>
         <section className="panel arena-wrap">
-          <div className="arena-top"><span>LOCAL SIMULATION: <b>{isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : combatActive ? `LIVE · ${Math.round((game.simTime || 0) / 1000)}s` : 'STAGING SEQUENCE'}</span></div>
+          <div className="arena-top"><span>LOCAL SIMULATION: <b>{isOnslaughtMatch ? 'ONSLAUGHT' : isBotMatch ? 'BOT TRAINING' : me === 'host' ? 'HOST' : 'CONNECTED'}</b></span><span>{matchOver ? 'MATCH COMPLETE' : combatActive ? `LIVE · ${Math.round((game.simTime || 0) / 1000)}s` : 'STAGING SEQUENCE'}</span></div>
           <div className="arena-stage">
             <ArenaCanvas game={game} role={me} selected={selected} onSelectShip={setSelected} onMoveShip={combatActive ? handleMove : undefined} onCancelMove={combatActive ? handleCancelMove : undefined} matchOver={combatLocked} expression={materializeFormulaParams(formula, formulaParams)} reverse={reverseFire} power={power} previewDisabled={combatLocked || !combatActive} enemyPing={enemyPing} />
             <div className="event-queue" aria-live="polite">{notices.map(notice => <div className="event show" key={notice.id} style={{ borderLeftColor: notice.accent }}>{notice.message}</div>)}</div>
             {!combatActive && !matchOver && <LaunchCountdown seconds={countdownSeconds} />}
           </div>
-          {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} clearTimeMs={botClearTimeMs} onRestart={restartBotMatch} onLeave={leave} />}
+          {matchOver && <MatchConclusion won={won} isBotMatch={isBotMatch} isOnslaughtMatch={isOnslaughtMatch} myRemaining={liveShips(game, me).length} foeRemaining={liveShips(game, foe).length} clearTimeMs={botClearTimeMs} destroyed={onslaughtDestroyed} onRestart={isOnslaughtMatch ? restartOnslaughtMatch : restartBotMatch} onLeave={leave} />}
         </section>
         <aside className="panel command-panel" aria-label="Fire control computer">
           <div className="formula command-editor">
@@ -588,7 +600,12 @@ function formatClearTime(timeMs) {
   return minutes ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`;
 }
 
-function MatchConclusion({ won, isBotMatch, myRemaining, foeRemaining, clearTimeMs, onRestart, onLeave }) {
-  const title = won ? 'SECTOR SECURED' : 'FLEET LOST', detail = won ? (isBotMatch ? 'Training objective complete. The bot fleet is dark.' : 'Opponent fleet eliminated. Your sector is secure.') : (isBotMatch ? 'The navigation AI eliminated your fleet.' : 'Your opponent eliminated the fleet.');
-  return <section className={'match-conclusion ' + (won ? 'victory' : 'defeat')} role="dialog" aria-modal="true" aria-labelledby="match-result-title"><div className="result-signal">{won ? '◈' : '✕'} MATCH RESULT</div><h2 id="match-result-title">{title}</h2><p>{detail}</p><div className="result-score"><span><b>{myRemaining}</b> YOUR SHIPS</span><i>:</i><span><b>{foeRemaining}</b> {isBotMatch ? 'BOT SHIPS' : 'RIVAL SHIPS'}</span>{clearTimeMs && <><i>:</i><span><b>{formatClearTime(clearTimeMs)}</b> CLEAR</span></>}</div>{isBotMatch ? <button className="result-primary" onClick={onRestart}>RUN NEW TRAINING MATCH</button> : <button className="result-primary" onClick={onLeave}>RETURN TO LOBBY</button>}<button className="result-secondary" onClick={onLeave}>{isBotMatch ? 'RETURN TO LOBBY' : 'LEAVE MATCH'}</button></section>;
+function MatchConclusion({ won, isBotMatch, isOnslaughtMatch, myRemaining, foeRemaining, clearTimeMs, destroyed, onRestart, onLeave }) {
+  const title = isOnslaughtMatch ? 'FLEET OVERRUN' : won ? 'SECTOR SECURED' : 'FLEET LOST';
+  const detail = isOnslaughtMatch
+    ? `Onslaught ended. ${destroyed || 0} enemies destroyed before the line broke.`
+    : won
+      ? (isBotMatch ? 'Training objective complete. The bot fleet is dark.' : 'Opponent fleet eliminated. Your sector is secure.')
+      : (isBotMatch ? 'The navigation AI eliminated your fleet.' : 'Your opponent eliminated the fleet.');
+  return <section className={'match-conclusion ' + (won && !isOnslaughtMatch ? 'victory' : 'defeat')} role="dialog" aria-modal="true" aria-labelledby="match-result-title"><div className="result-signal">{won && !isOnslaughtMatch ? '◈' : '✕'} MATCH RESULT</div><h2 id="match-result-title">{title}</h2><p>{detail}</p><div className="result-score"><span><b>{myRemaining}</b> YOUR SHIPS</span><i>:</i><span><b>{foeRemaining}</b> {isOnslaughtMatch ? 'ACTIVE' : isBotMatch ? 'BOT SHIPS' : 'RIVAL SHIPS'}</span>{clearTimeMs && <><i>:</i><span><b>{formatClearTime(clearTimeMs)}</b> CLEAR</span></>}{isOnslaughtMatch && <><i>:</i><span><b>{destroyed || 0}</b> DESTROYED</span></>}</div>{isBotMatch || isOnslaughtMatch ? <button className="result-primary" onClick={onRestart}>{isOnslaughtMatch ? 'RUN NEW ONSLAUGHT' : 'RUN NEW TRAINING MATCH'}</button> : <button className="result-primary" onClick={onLeave}>RETURN TO LOBBY</button>}<button className="result-secondary" onClick={onLeave}>{isBotMatch || isOnslaughtMatch ? 'RETURN TO LOBBY' : 'LEAVE MATCH'}</button></section>;
 }

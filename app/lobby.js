@@ -15,12 +15,6 @@ async function api(path, options = {}) {
   return body;
 }
 
-function formatClearTime(timeMs) {
-  const totalSeconds = Math.max(0, Math.round(timeMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60), seconds = totalSeconds % 60;
-  return minutes ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`;
-}
-
 export default function Lobby() {
   const router = useRouter();
   const timer = useRef(null);
@@ -110,6 +104,13 @@ export default function Lobby() {
     router.push(`/match/bot-${crypto.randomUUID()}`);
   }
 
+  function playOnslaught() {
+    const commanderName = saveCommanderName();
+    if (!commanderName) return;
+    sessionStorage.removeItem(sessionKey);
+    router.push(`/match/onslaught-${crypto.randomUUID()}`);
+  }
+
   function normalizeCode(value) {
     setPrivateCode(value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6));
   }
@@ -136,6 +137,7 @@ export default function Lobby() {
             <button className="mode-card" disabled={!commanderReady} onClick={() => begin('public')}><strong>PUBLIC</strong></button>
             <button className="mode-card private-mode" disabled={!commanderReady} onClick={() => setPanel('private')}><strong>PRIVATE</strong></button>
             <button className="mode-card bot-mode" disabled={!commanderReady} onClick={playBot}><strong>BOT</strong></button>
+            <button className="mode-card onslaught-mode" disabled={!commanderReady} onClick={playOnslaught}><strong>ONSLAUGHT</strong></button>
           </div>
         </section>}
 
@@ -173,9 +175,9 @@ export default function Lobby() {
     </section>
 
     <Tutorial />
-    <section className="leaderboard-card" aria-label="Fastest bot clear leaderboard">
-      <div className="leaderboard-head"><span className="eyebrow">BOT CLEAR RECORDS</span><h2>Fastest training clears</h2></div>
-      {leaderboardUnavailable ? <p className="leaderboard-empty">Leaderboard storage is not configured yet.</p> : leaderboard.length ? <ol>{leaderboard.map(entry => <li key={`${entry.rank}-${entry.username}`}><span>{String(entry.rank).padStart(2, '0')}</span><b>{entry.username}</b><time>{formatClearTime(entry.timeMs)}</time></li>)}</ol> : <p className="leaderboard-empty">No bot clears posted yet. Be the first to make the AI look silly.</p>}
+    <section className="leaderboard-card" aria-label="Onslaught destroyed enemies leaderboard">
+      <div className="leaderboard-head"><span className="eyebrow">ONSLAUGHT RECORDS</span><h2>Most enemies destroyed</h2></div>
+      {leaderboardUnavailable ? <p className="leaderboard-empty">Leaderboard storage is not configured yet.</p> : leaderboard.length ? <ol>{leaderboard.map(entry => <li key={`${entry.rank}-${entry.username}`}><span>{String(entry.rank).padStart(2, '0')}</span><b>{entry.username}</b><time>{entry.kills}</time></li>)}</ol> : <p className="leaderboard-empty">No onslaught runs posted yet. Hold the line and set the first mark.</p>}
     </section>
   </div>;
 }

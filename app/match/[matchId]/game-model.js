@@ -19,6 +19,12 @@ export const MATCH_COUNTDOWN_MS = 5_000;
 export const MATCH_OUTCOME_DELAY_MS = 2_000;
 export const BOT_OPENING_SHOT_DELAY_MS = 10_000;
 export const BOT_SHOT_COOLDOWN_MS = 5_000;
+export const ONSLAUGHT_INITIAL_ENEMIES = 4;
+export const ONSLAUGHT_MAX_ENEMIES = 7;
+export const ONSLAUGHT_SPAWN_INTERVAL_MS = 20_000;
+export const ONSLAUGHT_ENEMY_ENERGY = 20;
+export const ONSLAUGHT_BOT_SHOT_COOLDOWN_MS = 8_000;
+export const ONSLAUGHT_ENTRY_SPEED = 32;
 export const BOT_MOVE_START_ENERGY = 40;
 export const STARTING_SHIP_ENERGY = Object.freeze([15, 30, 45, 60]);
 export const DEFAULT_HOST_COLOR = '#55d5cc';
@@ -44,9 +50,32 @@ export const measurePathLength = path => {
   return total;
 };
 
-export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { botMatch = false } = {}) => {
-  const random = seededRandom(seed), ships = createFleets(random), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets), cosmetics = createCosmetics(seed, botMatch);
-  return { seed, simTime: 0, phase: 'countdown', countdownMs: MATCH_COUNTDOWN_MS, outcome: null, pendingOutcome: null, outcomeAt: null, endReason: null, shotNumber: 0, botLastShotAt: null, botShotsSinceRoam: 0, botRoamAfter: 3 + Math.floor(random() * 2), trails: [], blooms: [], ships, planets, asteroids, cosmetics };
+export const createMatch = (seed = Math.floor(Math.random() * 0xffffffff), { botMatch = false, onslaught = false } = {}) => {
+  const random = seededRandom(seed), ships = createFleets(random, { onslaught }), planets = createPlanets(random, ships), asteroids = createAsteroids(random, ships, planets), cosmetics = createCosmetics(seed, botMatch || onslaught);
+  if (onslaught) assignOnslaughtEntryLanes(random, ships.guest, { planets, asteroids });
+  return {
+    seed,
+    simTime: 0,
+    phase: 'countdown',
+    countdownMs: MATCH_COUNTDOWN_MS,
+    outcome: null,
+    pendingOutcome: null,
+    outcomeAt: null,
+    endReason: null,
+    shotNumber: 0,
+    botLastShotAt: null,
+    botShotsSinceRoam: 0,
+    botRoamAfter: 3 + Math.floor(random() * 2),
+    onslaught,
+    onslaughtDestroyed: 0,
+    onslaughtNextSpawnAt: onslaught ? MATCH_COUNTDOWN_MS + ONSLAUGHT_SPAWN_INTERVAL_MS : null,
+    trails: [],
+    blooms: [],
+    ships,
+    planets,
+    asteroids,
+    cosmetics,
+  };
 };
 
 function createCosmetics(seed, botMatch) {
@@ -64,7 +93,7 @@ function createShip(x, y, role, energy = 0) {
   return { x, y, hp: 1, energy, angle: role === 'host' ? 0 : Math.PI, vx: 0, vy: 0, waypoint: null, moving: false, braking: false };
 }
 
-function createFleets(random) {
+function createFleets(random, { onslaught = false } = {}) {
   const margin = SHIP_RADIUS * 3, minimumSeparation = SHIP_RADIUS * 9;
   const fleet = side => {
     const ships = [], minX = side === 'host' ? margin : WORLD.width * (2 / 3) + margin, maxX = side === 'host' ? WORLD.width / 3 - margin : WORLD.width - margin;
@@ -75,7 +104,66 @@ function createFleets(random) {
     if (ships.length !== 4) throw Error('Unable to place fleet.');
     return ships;
   };
-  return { host: fleet('host'), guest: fleet('guest') };
+  return { host: fleet('host'), guest: onslaught ? createOnslaughtFleet(random, ONSLAUGHT_INITIAL_ENEMIES) : fleet('guest') };
+}
+
+function createOnslaughtFleet(random, count) {
+  const ships = [];
+  for (let index = 0; index < count; index += 1) ships.push(createOnslaughtShip(random, ships));
+  return ships;
+}
+
+function createOnslaughtShip(random = Math.random, existingShips = [], game = null) {
+  const margin = SHIP_RADIUS * 2;
+  const lane = chooseOnslaughtEntryLane(random, existingShips, game);
+  const y = lane?.y ?? Math.round(between(random, margin, WORLD.height - margin));
+  const ship = createShip(WORLD.width - margin, y, 'guest', ONSLAUGHT_ENEMY_ENERGY);
+  ship.entryTargetX = lane?.entryTargetX ?? Math.round(between(random, WORLD.width * 0.72, WORLD.width - margin * 2));
+  ship.angle = Math.PI;
+  return ship;
+}
+
+function assignOnslaughtEntryLanes(random, ships, game) {
+  for (let index = 0; index < ships.length; index += 1) {
+    const ship = ships[index];
+    const lane = chooseOnslaughtEntryLane(random, ships.slice(0, index), game);
+    if (!lane) continue;
+    ship.y = lane.y;
+    ship.entryTargetX = lane.entryTargetX;
+  }
+}
+
+function chooseOnslaughtEntryLane(random = Math.random, existingShips = [], game = null) {
+  const margin = SHIP_RADIUS * 2;
+  const eastX = WORLD.width - margin;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const y = Math.round(between(random, margin, WORLD.height - margin));
+    const entryTargetX = Math.round(between(random, WORLD.width * 0.72, WORLD.width - margin * 2));
+    const spaced = existingShips.every(ship => !ship.hp || Math.abs(ship.y - y) > SHIP_RADIUS * 6);
+    if (!spaced) continue;
+    if (game && !isOnslaughtEntryClear(game, { x: eastX, y }, { x: entryTargetX, y })) continue;
+    return { y, entryTargetX };
+  }
+  for (let y = margin; y <= WORLD.height - margin; y += SHIP_RADIUS * 2) {
+    for (const entryTargetX of [WORLD.width * 0.86, WORLD.width * 0.78, WORLD.width * 0.72]) {
+      const roundedX = Math.round(entryTargetX);
+      const spaced = existingShips.every(ship => !ship.hp || Math.abs(ship.y - y) > SHIP_RADIUS * 4);
+      if (!spaced) continue;
+      if (game && !isOnslaughtEntryClear(game, { x: eastX, y }, { x: roundedX, y })) continue;
+      return { y, entryTargetX: roundedX };
+    }
+  }
+  return null;
+}
+
+function isOnslaughtEntryClear(game, from, to) {
+  const dx = to.x - from.x;
+  const steps = Math.max(8, Math.ceil(Math.abs(dx) / 5));
+  for (let index = 0; index <= steps; index += 1) {
+    const t = index / steps;
+    if (hitsObstacle(game, { x: from.x + dx * t, y: from.y })) return false;
+  }
+  return true;
 }
 
 function createPlanets(random, ships) {
@@ -161,6 +249,14 @@ function cloneShip(ship) {
 
 function checkOutcome(game) {
   if (game.outcome || game.pendingOutcome) return;
+  if (game.onslaught) {
+    if (!liveShips(game, 'host').length) {
+      game.pendingOutcome = 'guest';
+      game.outcomeAt = (game.simTime || 0) + MATCH_OUTCOME_DELAY_MS;
+      game.endReason = 'onslaught-overrun';
+    }
+    return;
+  }
   for (const role of ['host', 'guest']) {
     if (!liveShips(game, ROLES[role]).length) {
       game.pendingOutcome = role;
@@ -204,6 +300,8 @@ export function advanceSimulation(game, deltaMs) {
       }
     }
   }
+  if (next.onslaught && next.phase === 'live') events.push(...advanceOnslaughtSpawns(next));
+  checkOutcome(next);
   resolvePendingOutcome(next);
   return { game: next, events };
 }
@@ -220,6 +318,22 @@ function finishArrival(ship) {
 
 function updateShipMovement(ship, dtSec) {
   const margin = SHIP_RADIUS * 2, minSpeed = 0.03;
+  if (ship.entryTargetX != null) {
+    ship.moving = false;
+    ship.braking = false;
+    ship.waypoint = null;
+    ship.vx = -ONSLAUGHT_ENTRY_SPEED;
+    ship.vy = 0;
+    ship.angle = Math.PI;
+    ship.x = Math.max(ship.entryTargetX, ship.x + ship.vx * dtSec);
+    ship.y = Math.max(margin, Math.min(WORLD.height - margin, ship.y));
+    if (ship.x <= ship.entryTargetX + 0.01) {
+      ship.x = ship.entryTargetX;
+      ship.vx = 0;
+      ship.entryTargetX = null;
+    }
+    return;
+  }
   if (ship.braking) {
     applyDeceleration(ship, dtSec, minSpeed);
   } else if (ship.waypoint && ship.moving) {
@@ -256,6 +370,19 @@ function applyDeceleration(ship, dtSec, minSpeed) {
   if (newSpeed < minSpeed) {
     ship.vx = 0; ship.vy = 0; ship.braking = false;
   }
+}
+
+function advanceOnslaughtSpawns(game) {
+  const events = [];
+  if (game.onslaughtNextSpawnAt == null) game.onslaughtNextSpawnAt = (game.simTime || 0) + ONSLAUGHT_SPAWN_INTERVAL_MS;
+  while ((game.simTime || 0) >= game.onslaughtNextSpawnAt) {
+    if (liveShips(game, 'guest').length < ONSLAUGHT_MAX_ENEMIES) {
+      game.ships.guest.push(createOnslaughtShip(Math.random, game.ships.guest, game));
+      events.push({ key: 'onslaughtReinforcement' });
+    }
+    game.onslaughtNextSpawnAt += ONSLAUGHT_SPAWN_INTERVAL_MS;
+  }
+  return events;
 }
 
 export function applyGameAction(game, action) {
@@ -318,7 +445,11 @@ function applyFire(game, action) {
   if (impact?.kind === 'asteroid') next.asteroids = next.asteroids.filter(asteroid => asteroid.id !== impact.asteroidId);
   if (impact?.kind === 'ship') {
     const target = next.ships[impact.shipRole]?.[impact.shipIndex];
-    if (target?.hp) { target.hp = 0; hit = true; }
+    if (target?.hp) {
+      target.hp = 0;
+      hit = true;
+      if (next.onslaught && impact.shipRole === 'guest') next.onslaughtDestroyed = (next.onslaughtDestroyed || 0) + 1;
+    }
   }
   if (impact) next.blooms = [...(next.blooms || []), { id: next.shotNumber, impact }].slice(-8);
   checkOutcome(next);
@@ -395,7 +526,8 @@ export function createBotAction(game) {
   }
 
   const combatTime = Math.max(0, game.simTime - (game.countdownMs ?? MATCH_COUNTDOWN_MS));
-  const canFire = combatTime >= BOT_OPENING_SHOT_DELAY_MS && (game.botLastShotAt === null || game.simTime - game.botLastShotAt >= BOT_SHOT_COOLDOWN_MS);
+  const shotCooldown = game.onslaught ? ONSLAUGHT_BOT_SHOT_COOLDOWN_MS : BOT_SHOT_COOLDOWN_MS;
+  const canFire = combatTime >= BOT_OPENING_SHOT_DELAY_MS && (game.botLastShotAt === null || game.simTime - game.botLastShotAt >= shotCooldown);
   if (canFire) {
     for (const { ship, index } of shuffle(shooters)) {
       const target = chooseBotTarget(ship, targets);
