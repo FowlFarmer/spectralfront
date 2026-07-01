@@ -32,7 +32,7 @@ export default function Lobby() {
   const [leaderboardUnavailable, setLeaderboardUnavailable] = useState(false);
 
   const usernameValidation = useMemo(() => validateUsername(usernameInput), [usernameInput]);
-  const commanderReady = usernameValidation.ok;
+  const hasCallsignInput = usernameInput.trim().length > 0;
 
   useEffect(() => () => clearInterval(timer.current), []);
   useEffect(() => {
@@ -44,20 +44,27 @@ export default function Lobby() {
   }, []);
 
   function saveCommanderName() {
+    if (!hasCallsignInput) {
+      localStorage.removeItem(USERNAME_STORAGE_KEY);
+      return '';
+    }
     setUsernameTouched(true);
-    if (!usernameValidation.ok) return null;
+    if (!usernameValidation.ok) {
+      localStorage.removeItem(USERNAME_STORAGE_KEY);
+      return '';
+    }
     localStorage.setItem(USERNAME_STORAGE_KEY, usernameValidation.username);
     setUsernameInput(usernameValidation.username);
     return usernameValidation.username;
   }
 
-  function watchForMatch(nextTicket, commanderName) {
+  function watchForMatch(nextTicket, commanderName, playMode) {
     const check = async () => {
       try {
         const found = await api(`/api/join?ticket=${encodeURIComponent(nextTicket)}`);
         if (found.status === 'matched') {
           clearInterval(timer.current);
-          sessionStorage.setItem(sessionKey, JSON.stringify({ ticket: nextTicket, commanderName, ...found }));
+          sessionStorage.setItem(sessionKey, JSON.stringify({ ticket: nextTicket, commanderName, playMode, ...found }));
           router.push(`/match/${found.matchId}`);
         }
         if (found.status === 'expired') {
@@ -73,7 +80,6 @@ export default function Lobby() {
 
   async function begin(mode, code) {
     const commanderName = saveCommanderName();
-    if (!commanderName) return;
     clearInterval(timer.current);
     const nextTicket = crypto.randomUUID();
     setTicket(nextTicket);
@@ -82,7 +88,7 @@ export default function Lobby() {
     try {
       const result = await api('/api/join', { method: 'POST', body: JSON.stringify({ ticket: nextTicket, mode, code }) });
       if (mode === 'private-create') setLobbyCode(result.code);
-      watchForMatch(nextTicket, commanderName);
+      watchForMatch(nextTicket, commanderName, mode.startsWith('private') ? 'private' : 'public');
     } catch (error) {
       setStatus('error');
       setMessage(error.message);
@@ -99,14 +105,12 @@ export default function Lobby() {
 
   function playBot() {
     const commanderName = saveCommanderName();
-    if (!commanderName) return;
     sessionStorage.removeItem(sessionKey);
     router.push(`/match/bot-${crypto.randomUUID()}`);
   }
 
   function playOnslaught() {
     const commanderName = saveCommanderName();
-    if (!commanderName) return;
     sessionStorage.removeItem(sessionKey);
     router.push(`/match/onslaught-${crypto.randomUUID()}`);
   }
@@ -116,7 +120,8 @@ export default function Lobby() {
   }
 
   const isPrivateHost = waitingMode === 'private-create';
-  const showUsernameError = usernameTouched && !usernameValidation.ok;
+  const showUsernameError = usernameTouched && hasCallsignInput && !usernameValidation.ok;
+  const hasValidCallsign = hasCallsignInput && usernameValidation.ok;
 
   return <div className="shell">
     <header className="top home-top">
@@ -134,10 +139,10 @@ export default function Lobby() {
 
         {status === 'idle' && panel === 'choose' && <section className="join-card">
           <div className="mode-grid">
-            <button className="mode-card" disabled={!commanderReady} onClick={() => begin('public')}><strong>PUBLIC</strong></button>
-            <button className="mode-card private-mode" disabled={!commanderReady} onClick={() => setPanel('private')}><strong>PRIVATE</strong></button>
-            <button className="mode-card bot-mode" disabled={!commanderReady} onClick={playBot}><strong>BOT</strong></button>
-            <button className="mode-card onslaught-mode" disabled={!commanderReady} onClick={playOnslaught}><strong>ONSLAUGHT</strong></button>
+            <button className="mode-card" onClick={() => begin('public')}><strong>PUBLIC</strong></button>
+            <button className="mode-card private-mode" onClick={() => setPanel('private')}><strong>PRIVATE</strong></button>
+            <button className="mode-card bot-mode" onClick={playBot}><strong>BOT</strong></button>
+            <button className="mode-card onslaught-mode" onClick={playOnslaught}><strong>ONSLAUGHT</strong></button>
           </div>
         </section>}
 
@@ -152,10 +157,10 @@ export default function Lobby() {
           <button className="primary" disabled={privateCode.length !== 6} onClick={() => begin('private-join', privateCode)}>JOIN PRIVATE LOBBY</button>
         </section>}
 
-        {status === 'idle' && <label className={'username-entry callsign-strip ' + (showUsernameError ? 'invalid' : commanderReady ? 'valid' : '')}>
+        {status === 'idle' && <label className={'username-entry callsign-strip ' + (showUsernameError ? 'invalid' : hasValidCallsign ? 'valid' : '')}>
           <span>CALLSIGN</span>
           <input value={usernameInput} onBlur={() => setUsernameTouched(true)} onChange={event => { setUsernameTouched(true); setUsernameInput(event.target.value); }} placeholder="Commander name" maxLength={18} spellCheck="false" />
-          <small>{showUsernameError ? usernameValidation.error : commanderReady ? 'accepted' : 'required for records'}</small>
+          <small>{showUsernameError ? `${usernameValidation.error} Scores will be anonymous.` : hasValidCallsign ? '' : 'optional for records'}</small>
         </label>}
 
         {status === 'waiting' && <section className="status-card show private-status">

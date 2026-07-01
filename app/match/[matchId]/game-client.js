@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { track } from '@vercel/analytics';
 import ArenaCanvas from './arena-canvas';
 import { USERNAME_STORAGE_KEY } from '../../../lib/usernames';
 import {
@@ -23,6 +24,7 @@ import {
 import { notificationFor } from './notification-config';
 
 const sessionKey = 'spectral-front-session';
+const playerIdKey = 'spectral-front-anonymous-player-id';
 const request = async (path, options = {}) => { const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options }); const body = await response.json().catch(() => ({})); if (!response.ok) throw Error(body.error || 'Network error'); return body; };
 const notificationKeyForFireResult = (result, shooterRole, viewerRole) => {
   if (result.unstable) return shooterRole === viewerRole ? 'unstableFunction' : null;
@@ -81,6 +83,7 @@ async function candidatePairSummary(pc) {
 
 const numericLiteralPattern = /(?:\d+\.\d*|\.\d+|\d+)/g, CONSTANT_SLIDER_LIMIT = 100, CONSTANT_SLIDER_SPAN = 1000, CONSTANT_SLIDER_COARSE_STEP = 25, POWER_HOTKEY_STEP = 5, FORMULA_FIELD_MIN_HEIGHT = 60;
 const alphaTokenNames = ['sqrt', 'sin', 'cos', 'tan', 'abs', 'log', 'exp', 'ln', 'pi'];
+const functionReference = ['sin()', 'cos()', 'tan()', 'abs()', 'sqrt()', 'log()', 'ln()', 'exp()'];
 function numericLiterals(expression) {
   return Array.from(expression.matchAll(numericLiteralPattern), match => {
     const numberStart = match.index, end = numberStart + match[0].length, rawValue = Number(match[0]);
@@ -160,11 +163,20 @@ function replaceNumericLiteral(expression, index, value) {
   return `${expression.slice(0, literal.operatorStart ?? literal.start)}${replacement}${expression.slice(literal.end)}`;
 }
 
+function anonymousPlayerId() {
+  const existing = localStorage.getItem(playerIdKey);
+  if (existing) return existing;
+  const next = `anon_${crypto.randomUUID().replace(/-/g, '')}`;
+  localStorage.setItem(playerIdKey, next);
+  return next;
+}
+
 export default function GameClient({ matchId }) {
   const router = useRouter(), isBotMatch = matchId.startsWith('bot-'), isOnslaughtMatch = matchId.startsWith('onslaught-'), isLocalBotMatch = isBotMatch || isOnslaughtMatch;
   const peer = useRef(null), channel = useRef(null), session = useRef(null), gameRef = useRef(null);
   const botTimer = useRef(null), botTickKey = useRef(null);
   const noticeTimers = useRef(new Map()), simTimer = useRef(null), scoreSubmitted = useRef(null);
+  const playSession = useRef(null), playHeartbeat = useRef(null), playEnded = useRef(false);
   const formulaField = useRef(null);
   const [game, setGame] = useState(null), [selected, setSelected] = useState(0), [link, setLink] = useState('LINKING');
   const [problem, setProblem] = useState(''), [formula, setFormula] = useState('0.12 * sin(1.3*x) - 0.04*x');
@@ -184,7 +196,6 @@ export default function GameClient({ matchId }) {
     clearTimeout(botTimer.current); botTickKey.current = null;
     clearInterval(simTimer.current); channel.current?.close(); peer.current?.close();
   }, []);
-  const leave = useCallback(async () => { if (!isLocalBotMatch) try { await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: session.current?.ticket, message: { type: 'peer-left' } }) }); } catch {} stop(); sessionStorage.removeItem(sessionKey); router.push('/'); }, [isLocalBotMatch, router, stop]);
   const pushNotice = useCallback(key => {
     const notification = notificationFor(key);
     if (!notification) return;
@@ -193,16 +204,70 @@ export default function GameClient({ matchId }) {
     noticeTimers.current.set(id, window.setTimeout(() => { setNotices(queue => queue.filter(notice => notice.id !== id)); noticeTimers.current.delete(id); }, 15_000));
   }, []);
   const clearNotices = useCallback(() => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); noticeTimers.current.clear(); setNotices([]); }, []);
+  const postPlayEvent = useCallback((event, overrides = {}, keepalive = false) => {
+    const currentSession = playSession.current;
+    if (!currentSession) return;
+    const currentGame = gameRef.current;
+    const payload = {
+      event,
+      sessionId: currentSession.sessionId,
+      playerId: currentSession.playerId,
+      mode: currentSession.mode,
+      matchId,
+      role: session.current?.role || 'unknown',
+      startedAt: currentSession.startedAt,
+      durationMs: Date.now() - currentSession.startedAt,
+      outcome: currentGame?.outcome || '',
+      destroyed: currentGame?.onslaughtDestroyed || 0,
+      ...overrides,
+    };
+    const body = JSON.stringify(payload);
+    if (keepalive && navigator.sendBeacon) {
+      navigator.sendBeacon('/api/play', new Blob([body], { type: 'application/json' }));
+      return;
+    }
+    fetch('/api/play', { method: 'POST', headers: { 'content-type': 'application/json' }, body, keepalive }).catch(() => {});
+  }, [matchId]);
+  const endPlaySession = useCallback((overrides = {}, keepalive = false) => {
+    if (!playSession.current || playEnded.current) return;
+    playEnded.current = true;
+    clearInterval(playHeartbeat.current);
+    playHeartbeat.current = null;
+    track('play_end', { mode: playSession.current.mode, outcome: overrides.outcome || gameRef.current?.outcome || 'unknown' });
+    postPlayEvent('end', overrides, keepalive);
+  }, [postPlayEvent]);
+  const startPlaySession = useCallback(() => {
+    if (playSession.current) return;
+    playEnded.current = false;
+    playSession.current = {
+      sessionId: crypto.randomUUID(),
+      playerId: anonymousPlayerId(),
+      mode: isOnslaughtMatch ? 'onslaught' : isBotMatch ? 'bot' : session.current?.playMode || 'public',
+      startedAt: Date.now(),
+    };
+    track('play_start', { mode: playSession.current.mode });
+    postPlayEvent('start');
+    clearInterval(playHeartbeat.current);
+    playHeartbeat.current = window.setInterval(() => postPlayEvent('heartbeat'), 15_000);
+  }, [isBotMatch, isOnslaughtMatch, postPlayEvent]);
+  const resetPlaySession = useCallback(() => {
+    endPlaySession({}, true);
+    playSession.current = null;
+    playEnded.current = false;
+  }, [endPlaySession]);
+  const leave = useCallback(async () => { endPlaySession({}, true); if (!isLocalBotMatch) try { await request('/api/signal', { method: 'POST', body: JSON.stringify({ ticket: session.current?.ticket, message: { type: 'peer-left' } }) }); } catch {} stop(); sessionStorage.removeItem(sessionKey); router.push('/'); }, [endPlaySession, isLocalBotMatch, router, stop]);
   const restartBotMatch = useCallback(() => {
+    resetPlaySession();
     clearTimeout(botTimer.current); botTickKey.current = null;
     scoreSubmitted.current = null;
     clearNotices(); setSelected(0); setPower(75); setReverseFire(false); setFormulaParams({}); pushNotice('trainingInitialized'); publish(createMatch(undefined, { botMatch: true }));
-  }, [clearNotices, publish, pushNotice]);
+  }, [clearNotices, publish, pushNotice, resetPlaySession]);
   const restartOnslaughtMatch = useCallback(() => {
+    resetPlaySession();
     clearTimeout(botTimer.current); botTickKey.current = null;
     scoreSubmitted.current = null;
     clearNotices(); setSelected(0); setPower(75); setReverseFire(false); setFormulaParams({}); pushNotice('onslaughtInitialized'); publish(createMatch(undefined, { botMatch: true, onslaught: true }));
-  }, [clearNotices, publish, pushNotice]);
+  }, [clearNotices, publish, pushNotice, resetPlaySession]);
   const rememberArc = useCallback(expression => { const arc = expression.trim(); if (arc) setArcHistory(history => [arc, ...history.filter(entry => entry !== arc)].slice(0, 6)); }, []);
 
   const commitAction = useCallback(action => {
@@ -400,6 +465,23 @@ export default function GameClient({ matchId }) {
   }, [commitAction, isLocalBotMatch, isOnslaughtMatch, matchId, notifyEvents, publish, reportWebRTC, router, send]);
 
   useEffect(() => { let cleanup; connect().then(fn => cleanup = fn); return () => { cleanup?.(); stop(); }; }, [connect, stop]);
+  useEffect(() => {
+    if (!game || !session.current?.role) return;
+    startPlaySession();
+  }, [game?.seed, startPlaySession]);
+  useEffect(() => {
+    if (!game || !isMatchOver(game)) return;
+    endPlaySession({ outcome: game.outcome || 'unknown', destroyed: game.onslaughtDestroyed || 0 });
+  }, [endPlaySession, game]);
+  useEffect(() => {
+    const handlePageHide = () => endPlaySession({}, true);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      endPlaySession({}, true);
+      clearInterval(playHeartbeat.current);
+    };
+  }, [endPlaySession]);
   useEffect(() => () => { for (const timer of noticeTimers.current.values()) clearTimeout(timer); }, []);
   useEffect(() => {
     if (!enemyPing) return;
@@ -504,7 +586,7 @@ export default function GameClient({ matchId }) {
         <aside className="panel command-panel" aria-label="Fire control computer">
           <div className="formula command-editor">
             <div className="command-head"><span>FIRE COMPUTER</span><b>{combatActive ? 'ARMED' : 'STAGING'}</b></div>
-            <label>FIRING ARC: Y = F(X)</label>
+            <div className="formula-label-row"><label>FIRING ARC: Y = F(X)</label><div className="formula-functions" aria-label="Available parser functions">{functionReference.map(name => <code key={name}>{name}</code>)}</div></div>
             <div className="formula-row"><span>y =</span><textarea ref={formulaField} rows={2} value={formula} disabled={combatLocked} onChange={event => setFormula(event.target.value)} autoComplete="off" spellCheck="false" /></div>
           </div>
           <div className="command-scroll">

@@ -103,3 +103,7 @@ body{background:var(--bg);color:var(--ink)}
 @keyframes fire-state-impact{0%{opacity:0;transform:scale(.4)}42%{opacity:1;transform:scale(1.45)}100%{opacity:0;transform:scale(2.6)}}
 @keyframes terminal-caret{50%{opacity:.15}}
 @media(max-width:760px){.function-terminal{left:31px;width:198px}.fire-arc-stage{transform:translateX(-50%) scale(.92);transform-origin:top center}}
+.formula-label-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}.formula-label-row label{margin:0}.formula-functions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;max-width:194px}.formula-functions code{display:inline-flex;align-items:center;min-height:18px;padding:2px 5px;border:1px solid color-mix(in srgb,var(--player-ui,var(--aqua)) 32%,var(--line));border-radius:999px;background:color-mix(in srgb,var(--player-ui,var(--aqua)) 8%,transparent);color:color-mix(in srgb,var(--player-ui,var(--aqua)) 62%,var(--paper));font:700 8px/1 var(--mono);letter-spacing:.02em;white-space:nowrap}
+html[data-ui-identity="orbit"] .formula-functions code{border:2px solid #ffffff20;border-radius:999px;background:#211c3b;color:#fff6e7;box-shadow:0 3px 0 #0005}
+html[data-ui-identity="blackbox"] .formula-functions code{border:1px solid #f2eee2;border-radius:0;background:#050505;color:#f2eee2;text-transform:uppercase}
+@media(max-width:760px){.formula-label-row{display:grid}.formula-functions{justify-content:flex-start;max-width:none}}
